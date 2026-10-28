@@ -760,7 +760,11 @@ if (nrow(choices_all) == 0) {
 master_choices <- choices_all %>%
   distinct(field_name, code, .keep_all = TRUE) %>%
   group_by(field_name) %>%
-  mutate(ord = row_number()) %>%
+  mutate(ord = row_number(),
+         # Row labels must be unique within a variable and not clash with summary rows
+         label = ifelse(duplicated(label) | duplicated(label, fromLast = TRUE) |
+                          label %in% c("", "Missing", "None checked", "Total"),
+                        paste0(label, " [", code, "]"), label)) %>%
   ungroup() %>%
   select(field_name, code, label, ord)
 
@@ -801,7 +805,8 @@ trig_compare <- map(seq_len(nrow(master_dict)), function(i) {
   wide <- long %>%
     group_by(row) %>% mutate(ord = min(ord)) %>% ungroup() %>%
     select(row, ord, site, value) %>%
-    pivot_wider(names_from = site, values_from = value, values_fill = "-") %>%
+    pivot_wider(names_from = site, values_from = value, values_fill = "-",
+                values_fn = ~ paste(.x, collapse = " / ")) %>%
     arrange(ord) %>%
     select(-ord)
   for (s in site_labels) if (!s %in% names(wide)) wide[[s]] <- "Not in form"

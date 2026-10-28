@@ -189,15 +189,19 @@ table(mrcg_comm_raw$redcap_event_name)
 ```{r functions}
 # Build trigger dataset with baseline (bs_) variables and age
 # baseline_event / trigger_event: event names differ by site
+# bs_fields: baseline variables to attach (NULL = all bs_ variables)
 make_comm_trigger <- function(df,
                               baseline_event = "baseline_arm_1",
-                              trigger_event  = "trigger_arm_1") {
+                              trigger_event  = "trigger_arm_1",
+                              bs_fields      = NULL) {
 
-  # Baseline: non-repeating row only (one row per record), bs_ variables only
+  # Baseline: non-repeating row only (one row per record), baseline variables only
+  bs_cols <- if (is.null(bs_fields)) grep("^bs_", names(df), value = TRUE) else
+    names(df)[sub("___.*$", "", names(df)) %in% bs_fields]
   bs <- df %>%
     filter(redcap_event_name == baseline_event,
            is.na(redcap_repeat_instrument)) %>%
-    select(record_id, starts_with("bs_"))
+    select(record_id, all_of(bs_cols))
 
   # Add age-related variables missing in some sites (filled with NA)
   for (v in c("bs_dob", "bs_ic_dt", "bs_age_year", "bs_age_month", "bs_age_calc", "bs_est_dob_yrs")) {
@@ -283,14 +287,26 @@ age_table <- function(df) {
 # 5. Build trigger datasets
 
 ```{r build}
-mlw_comm_trig  <- make_comm_trigger(mlw_comm_raw) %>%
+# Attach only the baseline individual form (all bs_ variables if the form is not found)
+baseline_form <- "baseline_visit_individual"
+bs_fields_of  <- function(m) {
+  f <- m$field_name[m$form_name == baseline_form]
+  if (length(f) == 0) {
+    warning("Form '", baseline_form, "' not found: attaching all bs_ variables")
+    return(NULL)
+  }
+  f
+}
+
+mlw_comm_trig  <- make_comm_trigger(mlw_comm_raw, bs_fields = bs_fields_of(meta$MLW_COMM)) %>%
   add_age_group()
 
-pgi_comm_trig  <- make_comm_trigger(pgi_comm_raw) %>%
+pgi_comm_trig  <- make_comm_trigger(pgi_comm_raw, bs_fields = bs_fields_of(meta$PGI_COMM)) %>%
   add_age_group()
 
 mrcg_comm_trig <- make_comm_trigger(mrcg_comm_raw,
-                                    baseline_event = "baseline_q0_arm_1") %>%
+                                    baseline_event = "baseline_q0_arm_1",
+                                    bs_fields      = bs_fields_of(meta$MRCG_COMM)) %>%
   add_age_group()
 ```
 
@@ -407,10 +423,11 @@ map(age_ids, ~ count(.x, age_group, .drop = FALSE))
 
 # 8. All variables - summary by site
 
-All variables of the community trigger datasets (section 5: trigger variables plus
-baseline `bs_` variables) are summarised by variable type and compared side by
-side across sites, the same way as the Hospital report. Trigger variables are
-counted per trigger row; baseline variables once per record. Questions and answers
+Trigger form variables (`tr_`) of the community trigger datasets (section 5:
+trigger event rows with the baseline individual form attached) are summarised by
+variable type and compared side by side across sites, the same way as the
+Hospital report, counted per trigger row. Set `var_prefix` to `"."` to include
+the attached baseline variables as well (those are counted once per record). Questions and answers
 come from each site's data dictionary; branching logic sets each denominator.
 Sites are matched by variable name (no varmap): variables named differently at a
 site show as "Not in form" and are listed under data dictionary differences.
@@ -420,8 +437,8 @@ site show as "Not in form" and are listed under data dictionary differences.
 ```{r cmp-settings}
 site_labels <- c(MLW_COMM = "MLW", PGI_COMM = "PGI", MRCG_COMM = "MRCG")
 
-# Variables to compare (regex on field_name); "." = all variables in the trigger datasets
-var_prefix <- "."
+# Variables to compare (regex on field_name): trigger form only
+var_prefix <- "^tr_"
 
 # System / helper fields to exclude
 exclude_pattern <- "^record_id$|_warn|_entdt_server|_entdt_now|_entdt_utc|_entby_web|_entby_app"
@@ -725,7 +742,11 @@ if (nrow(choices_all) == 0) {
 master_choices <- choices_all %>%
   distinct(field_name, code, .keep_all = TRUE) %>%
   group_by(field_name) %>%
-  mutate(ord = row_number()) %>%
+  mutate(ord = row_number(),
+         # Row labels must be unique within a variable and not clash with summary rows
+         label = ifelse(duplicated(label) | duplicated(label, fromLast = TRUE) |
+                          label %in% c("", "Missing", "None checked", "Total"),
+                        paste0(label, " [", code, "]"), label)) %>%
   ungroup() %>%
   select(field_name, code, label, ord)
 
@@ -766,7 +787,8 @@ trig_compare <- map(seq_len(nrow(master_dict)), function(i) {
   wide <- long %>%
     group_by(row) %>% mutate(ord = min(ord)) %>% ungroup() %>%
     select(row, ord, site, value) %>%
-    pivot_wider(names_from = site, values_from = value, values_fill = "-") %>%
+    pivot_wider(names_from = site, values_from = value, values_fill = "-",
+                values_fn = ~ paste(.x, collapse = " / ")) %>%
     arrange(ord) %>%
     select(-ord)
   for (s in site_labels) if (!s %in% names(wide)) wide[[s]] <- "Not in form"

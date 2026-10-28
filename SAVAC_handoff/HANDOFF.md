@@ -113,8 +113,11 @@ site_fields, site_form, site_label, site_choices, note, confirmed`
   trigger_event는 같은 이름 51개(PGI만 2, MRCG만 14), baseline_visit_individual은 같은 이름 51개(PGI만 31, MRCG만 26).
 - MRCG `record_id`는 숫자형, MLW는 문자형 → 합칠 때 문자형으로 통일.
 - 나이대별 사이트 요약표(`age_summary`, n (%) 버전) + 사이트별 나이대 ID 리스트(`age_ids`, 엑셀 시트 ids_*).
-- 8. 모든 항목별 사이트 비교 (Hospital 7번과 같은 함수): trigger 데이터셋의 모든 변수,
-  변수명으로 사이트 매칭(varmap 없음). trigger 변수는 trigger 행 기준, `bs_` 변수는 레코드당 1번.
+- trigger 데이터셋 = trigger 이벤트 행 + baseline 이벤트의 `baseline_visit_individual` form 변수만
+  (`bs_fields_of()`; form이 없으면 모든 bs_ 변수로 대체하고 경고).
+- 8. 항목별 사이트 비교 (Hospital 7번과 같은 함수): **trigger form(`tr_`) 변수만** (`var_prefix <- "^tr_"`),
+  trigger 행 기준. 변수명으로 사이트 매칭(varmap 없음).
+- 선택지 라벨이 겹치거나 Missing/Total과 같으면 `라벨 [코드]`로 구분 (Hospital도 동일 수정).
 - 9. 워드 `SAVAC_COMM_report_YYYYMMDD.docx` (나이대 요약 + ID 리스트 → 변수 비교),
   10. 엑셀 `SAVAC_comm_age_summary_*.xlsx`, `SAVAC_comm_variables_summary_*.xlsx`.
 - Community 딕셔너리는 아직 못 받음: MRCG 등 변수명이 다르면 Hospital처럼 varmap이 필요할 수 있음.
