@@ -105,7 +105,12 @@ site_fields, site_form, site_label, site_choices, note, confirmed`
   → 없으면 `bs_age_year`(+month). PGI는 DOB 대신 age_year만 있는 경우가 있음.
   MRCG의 `bs_dob`는 실제 데이터에서 전부 비어 있었음 (de-identified export 가능성).
 - MRCG `record_id`는 숫자형, MLW는 문자형 → 합칠 때 문자형으로 통일.
-- 나이대별 사이트 요약표(`age_summary`, n (%) 버전).
+- 나이대별 사이트 요약표(`age_summary`, n (%) 버전) + 사이트별 나이대 ID 리스트(`age_ids`, 엑셀 시트 ids_*).
+- 8. 모든 항목별 사이트 비교 (Hospital 7번과 같은 함수): trigger 데이터셋의 모든 변수,
+  변수명으로 사이트 매칭(varmap 없음). trigger 변수는 trigger 행 기준, `bs_` 변수는 레코드당 1번.
+- 9. 워드 `SAVAC_COMM_report_YYYYMMDD.docx` (나이대 요약 + ID 리스트 → 변수 비교),
+  10. 엑셀 `SAVAC_comm_age_summary_*.xlsx`, `SAVAC_comm_variables_summary_*.xlsx`.
+- Community 딕셔너리는 아직 못 받음: MRCG 등 변수명이 다르면 Hospital처럼 varmap이 필요할 수 있음.
 
 ## 5. 다음 단계 (제안)
 
