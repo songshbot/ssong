@@ -108,7 +108,7 @@ site_fields, site_form, site_label, site_choices, note, confirmed`
 - **MRCG Community 레코드는 REDCap API가 아닌 원본 CSV에서 읽음** (REDCap import가 제대로 안 됨):
   `csv_file["MRCG_COMM"]` = Box 경로의 `LEO31452SavacCommuni_DATA_2026-08-14_0943(in).csv`.
   메타데이터는 API. 메타데이터로 형식 변환(코드/숫자 → numeric, 날짜 → Date).
-  **MRCG 파일의 날짜는 모두 MM/DD/YYYY** (예: 399번 bs_ic_dt 11/20/2025) → `csv_slash_order <- "mdY"`.
+  **MRCG 파일의 날짜는 모두 MM/DD/YYYY** (예: 399번 bs_ic_dt 11/20/2025) → `csv_slash_order <- c(MRCG_COMM = "mdY")` (MRCG에만 적용).
   (NA로 두면 12보다 큰 자리로 순서 판단). 날짜로 못 읽은 값은 변수별로 경고.
   label 데이터는 `raw_to_label()`로 생성. 인코딩이 깨지면 `csv_encoding <- "latin1"`.
 - MRCG·PGI Community 딕셔너리 받음 (MLW Community 딕셔너리는 아직 없음). 변수명 비교:

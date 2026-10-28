@@ -114,7 +114,7 @@ site_fields, site_form, site_label, site_choices, note, confirmed`
 - **MRCG Community 레코드는 REDCap API가 아닌 원본 CSV에서 읽음** (REDCap import가 제대로 안 됨):
   `csv_file["MRCG_COMM"]` = Box 경로의 `LEO31452SavacCommuni_DATA_2026-08-14_0943(in).csv`.
   메타데이터는 API. 메타데이터로 형식 변환(코드/숫자 → numeric, 날짜 → Date).
-  **MRCG 파일의 날짜는 모두 MM/DD/YYYY** (예: 399번 bs_ic_dt 11/20/2025) → `csv_slash_order <- "mdY"`.
+  **MRCG 파일의 날짜는 모두 MM/DD/YYYY** (예: 399번 bs_ic_dt 11/20/2025) → `csv_slash_order <- c(MRCG_COMM = "mdY")` (MRCG에만 적용).
   (NA로 두면 12보다 큰 자리로 순서 판단). 날짜로 못 읽은 값은 변수별로 경고.
   label 데이터는 `raw_to_label()`로 생성. 인코딩이 깨지면 `csv_encoding <- "latin1"`.
 - MRCG·PGI Community 딕셔너리 받음 (MLW Community 딕셔너리는 아직 없음). 변수명 비교:
@@ -1380,9 +1380,10 @@ csv_file <- c(
 )
 csv_encoding <- "UTF-8-BOM"   # use "latin1" if characters look broken
 
-# Slash dates: "mdY" (MM/DD/YYYY) / "dmY" (DD/MM/YYYY), or NA = judge from the file
+# Slash date order per CSV site: "mdY" (MM/DD/YYYY) / "dmY" (DD/MM/YYYY);
+# a site not listed (or NA) is judged from its file
 # MRCG file: all dates are MM/DD/YYYY (e.g. bs_ic_dt 11/20/2025)
-csv_slash_order <- "mdY"
+csv_slash_order <- c(MRCG_COMM = "mdY")
 
 # Day / month order of slash dates, judged from values where one part is above 12
 # (11/20/2025 can only be MM/DD; 20/11/2025 can only be DD/MM)
@@ -1421,19 +1422,20 @@ read_redcap_csv <- function(path, m, site) {
     if (all(is.na(v) == is.na(d[[i]]))) d[[i]] <- v
   }
   # Date / datetime fields -> Date
+  set_ord   <- if (site %in% names(csv_slash_order)) csv_slash_order[[site]] else NA
   date_cols <- which(grepl("^date", fval))
   file_ev   <- slash_evidence(unlist(lapply(d[date_cols], na.omit)))
-  file_ord  <- if (!is.na(csv_slash_order)) csv_slash_order else slash_order_of(file_ev, "dmY")
+  file_ord  <- if (!is.na(set_ord)) set_ord else slash_order_of(file_ev, "dmY")
   message("  slash dates: ", file_ev[["n"]], " values; month-first evidence ", file_ev[["mdy"]],
           ", day-first evidence ", file_ev[["dmy"]], " -> read as ",
           ifelse(file_ord == "mdY", "MM/DD/YYYY", "DD/MM/YYYY"))
-  if (is.na(csv_slash_order) && file_ev[["n"]] > 0 && file_ev[["mdy"]] == 0 && file_ev[["dmy"]] == 0)
+  if (is.na(set_ord) && file_ev[["n"]] > 0 && file_ev[["mdy"]] == 0 && file_ev[["dmy"]] == 0)
     warning(site, ": day/month order of slash dates cannot be judged from the file; set csv_slash_order")
   for (i in date_cols) {
     raw <- d[[i]]
     ev  <- slash_evidence(na.omit(raw))
     # A column with its own evidence follows it (unless the order is set by hand)
-    ord <- if (!is.na(csv_slash_order)) csv_slash_order else slash_order_of(ev, file_ord)
+    ord <- if (!is.na(set_ord)) set_ord else slash_order_of(ev, file_ord)
     if (ev[["mdy"]] > 0 && ev[["dmy"]] > 0)
       warning(site, ": ", names(d)[i], " has both MM/DD and DD/MM slash dates - check the file")
     d[[i]] <- parse_redcap_date(raw, ord)
