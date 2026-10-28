@@ -111,6 +111,10 @@ site_fields, site_form, site_label, site_choices, note, confirmed`
   → `bs_age_year`(+month, month만 있으면 month/12) → `bs_est_dob_yrs`(MRCG 추정 나이). `age_source`에 출처 표시.
   MRCG `bs_dob`는 딕셔너리에서 Identifier로 지정돼 export에서 비어 옴. MRCG `bs_age_calc`는 DOB~`bs_visit_dt` 계산,
   DOB 모르면(`bs_dob_known = 99`) 나이는 `bs_est_dob_yrs`에만 있음. PGI `bs_age_calc`는 DOB/age_year/month 모두 반영.
+- **MRCG Community 레코드는 REDCap API가 아닌 원본 CSV에서 읽음** (REDCap import가 제대로 안 됨):
+  `csv_file["MRCG_COMM"]` = Box 경로의 `LEO31452SavacCommuni_DATA_2026-08-14_0943(in).csv`.
+  메타데이터는 API. 메타데이터로 형식 변환(코드/숫자 → numeric, 날짜 → Date, YYYY-MM-DD와 DD/MM/YYYY 모두),
+  label 데이터는 `raw_to_label()`로 생성. 인코딩이 깨지면 `csv_encoding <- "latin1"`.
 - MRCG·PGI Community 딕셔너리 받음 (MLW Community 딕셔너리는 아직 없음). 변수명 비교:
   trigger_event는 같은 이름 51개(PGI만 2, MRCG만 14), baseline_visit_individual은 같은 이름 51개(PGI만 31, MRCG만 26).
 - MRCG `record_id`는 숫자형, MLW는 문자형 → 합칠 때 문자형으로 통일.
@@ -1352,10 +1356,87 @@ read_metadata <- function(token, site) {
 }
 ```
 
+## 2.1 Records from a CSV file instead of the API
+
+MRCG community records did not import correctly into REDCap, so MRCG records are
+read from the original data file. The data dictionary still comes from the API.
+
+```{r csv-source}
+# Records file per site (NA = read records from the REDCap API)
+csv_file <- c(
+  MLW_COMM  = NA,
+  PGI_COMM  = NA,
+  MRCG_COMM = "C:/Users/saehyeun.song/Box/Data Science and Innovation (DSI)/Projects/OS/SAVAC/Gambia-MRCG/DM/10_DR/Rawdata/LEO31452SavacCommuni_DATA_2026-08-14_0943(in).csv"
+)
+csv_encoding <- "UTF-8-BOM"   # use "latin1" if characters look broken
+
+# Dates in the file may be YYYY-MM-DD (REDCap export) or DD/MM/YYYY (import template)
+parse_redcap_date <- function(x) {
+  as.Date(parse_date_time(as.character(x),
+                          orders = c("Ymd", "dmY", "Ymd HM", "Ymd HMS", "dmY HM", "dmY HMS"),
+                          quiet = TRUE))
+}
+
+# Read a REDCap raw-data CSV and set column types from the data dictionary
+read_redcap_csv <- function(path, m, site) {
+  message("> ", site, " [raw] reading ", basename(path))
+  d <- read.csv(path, colClasses = "character", na.strings = "", check.names = FALSE,
+                fileEncoding = csv_encoding)
+
+  base  <- sub("___.*$", "", names(d))
+  ftype <- m$field_type[match(base, m$field_name)]
+  fval  <- coalesce(m$text_validation_type_or_show_slider_number[match(base, m$field_name)], "")
+
+  # Codes and numbers -> numeric (only when every value is a number)
+  is_num <- ftype %in% c("radio", "dropdown", "yesno", "truefalse", "checkbox", "calc", "slider") |
+            grepl("^(number|integer)", fval) | names(d) == "redcap_repeat_instance"
+  for (i in which(is_num)) {
+    v <- suppressWarnings(as.numeric(d[[i]]))
+    if (all(is.na(v) == is.na(d[[i]]))) d[[i]] <- v
+  }
+  # Date / datetime fields -> Date
+  for (i in which(grepl("^date", fval))) d[[i]] <- parse_redcap_date(d[[i]])
+
+  missing_cols <- setdiff(c("record_id", "redcap_event_name", "redcap_repeat_instrument"), names(d))
+  if (length(missing_cols) > 0) warning(site, ": columns not in file: ", paste(missing_cols, collapse = ", "))
+  not_in_dict <- setdiff(base[!grepl("^redcap_|_complete$", names(d))], m$field_name)
+  if (length(not_in_dict) > 0) warning(site, ": ", length(not_in_dict), " columns not in data dictionary, e.g. ",
+                                       paste(head(not_in_dict, 5), collapse = ", "))
+
+  message("  OK: ", nrow(d), " rows / ", ncol(d), " cols")
+  tibble::as_tibble(d)
+}
+
+# Label version of raw data from the data dictionary (choices -> labels)
+raw_to_label <- function(d, m) {
+  for (i in seq_len(nrow(m))) {
+    f <- m$field_name[i]
+    t <- m$field_type[i]
+    if (!f %in% names(d) || !t %in% c("radio", "dropdown", "yesno", "truefalse")) next
+    ch <- switch(t, yesno = "1, Yes | 0, No", truefalse = "1, True | 0, False",
+                 m$select_choices_or_calculations[i])
+    parts <- trimws(strsplit(ch, "\\|")[[1]])
+    codes <- trimws(sub(",.*$", "", parts))
+    labs  <- trimws(sub("^[^,]*,", "", parts))
+    d[[f]] <- labs[match(as.character(d[[f]]), codes)]
+  }
+  for (i in grep("___", names(d))) d[[i]] <- ifelse(d[[i]] %in% 1, "Checked", "Unchecked")
+  d
+}
+```
+
 ```{r load-data}
-dat_raw   <- imap(tokens, read_redcap, raw_or_label = "raw")    # coded values
-dat_label <- imap(tokens, read_redcap, raw_or_label = "label")  # choice labels
-meta      <- imap(tokens, read_metadata)                         # data dictionaries
+meta <- imap(tokens, read_metadata)   # data dictionaries (API for all sites)
+
+# Records: API, or the CSV file set in csv_file
+dat_raw <- imap(tokens, function(tk, s) {
+  if (is.na(csv_file[[s]])) read_redcap(tk, s, raw_or_label = "raw")
+  else read_redcap_csv(csv_file[[s]], meta[[s]], s)
+})
+dat_label <- imap(tokens, function(tk, s) {
+  if (is.na(csv_file[[s]])) read_redcap(tk, s, raw_or_label = "label")
+  else raw_to_label(dat_raw[[s]], meta[[s]])
+})
 
 mlw_comm_raw  <- dat_raw$MLW_COMM
 pgi_comm_raw  <- dat_raw$PGI_COMM

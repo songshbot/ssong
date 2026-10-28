@@ -105,6 +105,10 @@ site_fields, site_form, site_label, site_choices, note, confirmed`
   → `bs_age_year`(+month, month만 있으면 month/12) → `bs_est_dob_yrs`(MRCG 추정 나이). `age_source`에 출처 표시.
   MRCG `bs_dob`는 딕셔너리에서 Identifier로 지정돼 export에서 비어 옴. MRCG `bs_age_calc`는 DOB~`bs_visit_dt` 계산,
   DOB 모르면(`bs_dob_known = 99`) 나이는 `bs_est_dob_yrs`에만 있음. PGI `bs_age_calc`는 DOB/age_year/month 모두 반영.
+- **MRCG Community 레코드는 REDCap API가 아닌 원본 CSV에서 읽음** (REDCap import가 제대로 안 됨):
+  `csv_file["MRCG_COMM"]` = Box 경로의 `LEO31452SavacCommuni_DATA_2026-08-14_0943(in).csv`.
+  메타데이터는 API. 메타데이터로 형식 변환(코드/숫자 → numeric, 날짜 → Date, YYYY-MM-DD와 DD/MM/YYYY 모두),
+  label 데이터는 `raw_to_label()`로 생성. 인코딩이 깨지면 `csv_encoding <- "latin1"`.
 - MRCG·PGI Community 딕셔너리 받음 (MLW Community 딕셔너리는 아직 없음). 변수명 비교:
   trigger_event는 같은 이름 51개(PGI만 2, MRCG만 14), baseline_visit_individual은 같은 이름 51개(PGI만 31, MRCG만 26).
 - MRCG `record_id`는 숫자형, MLW는 문자형 → 합칠 때 문자형으로 통일.
