@@ -1,0 +1,1135 @@
+---
+title: "SAVAC - Hospital RHD"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# 1. Setup
+
+```{r libraries}
+# install.packages(c("REDCapR", "dplyr", "tidyr", "purrr", "lubridate", "officer", "flextable", "writexl"))
+library(REDCapR)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(lubridate)
+library(readxl)
+library(officer)
+library(flextable)
+library(writexl)
+
+set_flextable_defaults(theme_fun = theme_vanilla)
+```
+
+# 2. Load data from REDCap
+
+```{r tokens}
+readRenviron("C:/Users/saehyeun.song/Documents/.Renviron")
+
+uri <- "https://ivirdc.ivi.int/api/"
+
+token_names <- c(
+  MLW_HOS  = "SAVAC_MLW_HOS_TOKEN_IVI",
+  PGI_HOS  = "SAVAC_PGI_HOS_TOKEN_PID181",
+  MRCG_HOS = "SAVAC_MRCG_HOS_TOKEN_IVI"
+)
+
+tokens <- Sys.getenv(token_names)
+names(tokens) <- names(token_names)
+
+# Stop if any token is missing
+missing <- names(tokens)[tokens == ""]
+if (length(missing) > 0) {
+  stop("Missing tokens in .Renviron: ", paste(token_names[missing], collapse = ", "))
+}
+```
+
+```{r load-functions}
+# Read records from one project ("raw" or "label")
+read_redcap <- function(token, site, raw_or_label = "raw") {
+  message("> ", site, " [", raw_or_label, "] loading...")
+  res <- REDCapR::redcap_read(
+    redcap_uri   = uri,
+    token        = token,
+    raw_or_label = raw_or_label,
+    batch_size   = 500,
+    verbose      = FALSE
+  )
+  if (!res$success) {
+    warning(site, " [", raw_or_label, "] failed: ", res$outcome_message)
+    return(NULL)
+  }
+  message("  OK: ", nrow(res$data), " rows / ", ncol(res$data), " cols")
+  res$data
+}
+
+# Read data dictionary from one project
+read_metadata <- function(token, site) {
+  message("> ", site, " [metadata] loading...")
+  res <- REDCapR::redcap_metadata_read(redcap_uri = uri, token = token, verbose = FALSE)
+  if (!res$success) {
+    warning(site, " [metadata] failed: ", res$outcome_message)
+    return(NULL)
+  }
+  res$data
+}
+```
+
+```{r load-data}
+dat_raw   <- imap(tokens, read_redcap, raw_or_label = "raw")    # coded values
+dat_label <- imap(tokens, read_redcap, raw_or_label = "label")  # choice labels
+meta      <- imap(tokens, read_metadata)                         # data dictionaries
+
+mlw_hos_raw  <- dat_raw$MLW_HOS
+pgi_hos_raw  <- dat_raw$PGI_HOS
+mrcg_hos_raw <- dat_raw$MRCG_HOS
+
+mlw_hos_lab  <- dat_label$MLW_HOS
+pgi_hos_lab  <- dat_label$PGI_HOS
+mrcg_hos_lab <- dat_label$MRCG_HOS
+
+mlw_hos_meta  <- meta$MLW_HOS
+pgi_hos_meta  <- meta$PGI_HOS
+mrcg_hos_meta <- meta$MRCG_HOS
+```
+
+# 3. Build RHD datasets
+
+- MLW / PGI: `redcap_event_name == "rhd_arm_1"`, keep ID/REDCap columns + variables starting with `rh`
+- MRCG: any `rhd_ppc_adm___1`-`___10` checked (== 1), keep all variables
+
+```{r rhd-datasets}
+# MLW
+mlw_rhd_idx <- which(mlw_hos_raw$redcap_event_name %in% "rhd_arm_1")
+mlw_rhd <- mlw_hos_raw[mlw_rhd_idx, ] %>%
+  select(record_id, starts_with("redcap_"), starts_with("rh"))
+mlw_rhd_lab <- mlw_hos_lab[mlw_rhd_idx, ] %>%
+  select(record_id, starts_with("redcap_"), starts_with("rh"))
+
+# PGI
+pgi_rhd_idx <- which(pgi_hos_raw$redcap_event_name %in% "rhd_arm_1")
+pgi_rhd <- pgi_hos_raw[pgi_rhd_idx, ] %>%
+  select(record_id, starts_with("redcap_"), starts_with("rh"))
+pgi_rhd_lab <- pgi_hos_lab[pgi_rhd_idx, ] %>%
+  select(record_id, starts_with("redcap_"), starts_with("rh"))
+
+# MRCG
+mrcg_rhd_idx <- which(rowSums(mrcg_hos_raw[grep("^rhd_ppc_adm___", names(mrcg_hos_raw))] == 1,
+                              na.rm = TRUE) > 0)
+mrcg_rhd     <- mrcg_hos_raw[mrcg_rhd_idx, ]
+mrcg_rhd_lab <- mrcg_hos_lab[mrcg_rhd_idx, ]
+```
+
+```{r rhd-dims}
+nrow(mlw_rhd);  ncol(mlw_rhd)
+nrow(pgi_rhd);  ncol(pgi_rhd)
+nrow(mrcg_rhd); ncol(mrcg_rhd)
+```
+
+# 4. Duplicate check
+
+```{r duplicates}
+# Rows vs unique record_id in full HOS datasets
+nrow(mlw_hos_raw);  n_distinct(mlw_hos_raw$record_id)
+nrow(pgi_hos_raw);  n_distinct(pgi_hos_raw$record_id)
+nrow(mrcg_hos_raw); n_distinct(mrcg_hos_raw$record_id)
+
+# Rows vs unique record_id in RHD datasets (should match if 1 row per record)
+nrow(mlw_rhd);  n_distinct(mlw_rhd$record_id)
+nrow(pgi_rhd);  n_distinct(pgi_rhd$record_id)
+nrow(mrcg_rhd); n_distinct(mrcg_rhd$record_id)
+
+# Duplicated record_id in RHD datasets (if any)
+mlw_rhd  %>% count(record_id) %>% filter(n > 1)
+pgi_rhd  %>% count(record_id) %>% filter(n > 1)
+mrcg_rhd %>% count(record_id) %>% filter(n > 1)
+```
+
+# 5. Counts step by step
+
+## 5.1 Enrolled
+
+- MLW / PGI: `rh_ic` OR `rh_no_ic` answered
+- MRCG: any `rhd_ppc_adm` option == 1
+
+```{r enrolled}
+mlw_rhd  %>% filter(!is.na(rh_ic) | !is.na(rh_no_ic)) %>% nrow()
+pgi_rhd  %>% filter(!is.na(rh_ic) | !is.na(rh_no_ic)) %>% nrow()
+mrcg_rhd %>% filter(if_any(starts_with("rhd_ppc_adm___"), ~ .x == 1)) %>% nrow()
+
+# Response distribution
+table(mlw_rhd$rh_ic,    useNA = "ifany")
+table(mlw_rhd$rh_no_ic, useNA = "ifany")
+table(pgi_rhd$rh_ic,    useNA = "ifany")
+table(pgi_rhd$rh_no_ic, useNA = "ifany")
+```
+
+## 5.2 MRCG - rhd_ppc_adm options
+
+```{r mrcg-ppc}
+sum(mrcg_rhd$rhd_ppc_adm___1  == 1, na.rm = TRUE)  # Shortness of breath
+sum(mrcg_rhd$rhd_ppc_adm___2  == 1, na.rm = TRUE)  # Chest pain
+sum(mrcg_rhd$rhd_ppc_adm___3  == 1, na.rm = TRUE)  # Swelling
+sum(mrcg_rhd$rhd_ppc_adm___4  == 1, na.rm = TRUE)  # New murmur
+sum(mrcg_rhd$rhd_ppc_adm___5  == 1, na.rm = TRUE)  # Infective endocarditis
+sum(mrcg_rhd$rhd_ppc_adm___6  == 1, na.rm = TRUE)  # Cardiac failure
+sum(mrcg_rhd$rhd_ppc_adm___7  == 1, na.rm = TRUE)  # Cardiac failure in pregnancy
+sum(mrcg_rhd$rhd_ppc_adm___8  == 1, na.rm = TRUE)  # Atrial fibrillation
+sum(mrcg_rhd$rhd_ppc_adm___9  == 1, na.rm = TRUE)  # Stroke
+sum(mrcg_rhd$rhd_ppc_adm___10 == 1, na.rm = TRUE)  # Other
+```
+
+## 5.3 Follow-up
+
+- MLW / PGI: `rhf_disch_dt` OR `rhf_disch_dt_na` answered
+- MRCG: `fwu_dof` OR `fwu_tof_up` answered
+
+```{r followup}
+mlw_rhd  %>% filter(!is.na(rhf_disch_dt) | !is.na(rhf_disch_dt_na)) %>% nrow()
+pgi_rhd  %>% filter(!is.na(rhf_disch_dt) | !is.na(rhf_disch_dt_na)) %>% nrow()
+mrcg_rhd %>% filter(!is.na(fwu_dof) | !is.na(fwu_tof_up)) %>% nrow()
+
+sum(!is.na(mrcg_rhd$fwu_dof))
+sum(!is.na(mrcg_rhd$fwu_tof_up))
+```
+
+# 6. Summary table
+
+```{r summary-base}
+rhd_summary <- tibble(
+  site = c("MLW", "PGI", "MRCG"),
+
+  # Unique records in full HOS dataset
+  n_total = c(
+    n_distinct(mlw_hos_raw$record_id),
+    n_distinct(pgi_hos_raw$record_id),
+    n_distinct(mrcg_hos_raw$record_id)
+  ),
+
+  # Enrolled in RHD: rh_ic OR rh_no_ic (MLW/PGI), any rhd_ppc_adm == 1 (MRCG)
+  n_enrolled_rhd = c(
+    mlw_rhd  %>% filter(!is.na(rh_ic) | !is.na(rh_no_ic)) %>% distinct(record_id) %>% nrow(),
+    pgi_rhd  %>% filter(!is.na(rh_ic) | !is.na(rh_no_ic)) %>% distinct(record_id) %>% nrow(),
+    mrcg_rhd %>% filter(if_any(starts_with("rhd_ppc_adm___"), ~ .x == 1)) %>% distinct(record_id) %>% nrow()
+  ),
+
+  # Follow-up: rhf_disch_dt OR rhf_disch_dt_na (MLW/PGI), fwu_dof OR fwu_tof_up (MRCG)
+  n_followup = c(
+    mlw_rhd  %>% filter(!is.na(rhf_disch_dt) | !is.na(rhf_disch_dt_na)) %>% distinct(record_id) %>% nrow(),
+    pgi_rhd  %>% filter(!is.na(rhf_disch_dt) | !is.na(rhf_disch_dt_na)) %>% distinct(record_id) %>% nrow(),
+    mrcg_rhd %>% filter(!is.na(fwu_dof) | !is.na(fwu_tof_up)) %>% distinct(record_id) %>% nrow()
+  )
+)
+```
+
+```{r summary-response}
+# Response codes for rh_ic / rh_no_ic
+mlw_hos_meta %>%
+  filter(field_name %in% c("rh_ic", "rh_no_ic")) %>%
+  select(field_name, select_choices_or_calculations)
+
+# Count unique records per response value; skip if variable not in dataset
+count_resp <- function(df, var, site) {
+  if (!var %in% names(df)) return(NULL)
+  df %>%
+    filter(!is.na(.data[[var]])) %>%
+    distinct(record_id, value = as.character(.data[[var]])) %>%
+    count(value) %>%
+    mutate(site = site, col = paste0(var, "_", value))
+}
+
+resp_counts <- bind_rows(
+  count_resp(mlw_rhd,  "rh_ic",    "MLW"),
+  count_resp(mlw_rhd,  "rh_no_ic", "MLW"),
+  count_resp(pgi_rhd,  "rh_ic",    "PGI"),
+  count_resp(pgi_rhd,  "rh_no_ic", "PGI"),
+  count_resp(mrcg_rhd, "rh_ic",    "MRCG"),
+  count_resp(mrcg_rhd, "rh_no_ic", "MRCG")
+)
+
+# Long format
+resp_counts %>% select(site, col, n)
+
+# Wide format: one column per response
+resp_wide <- resp_counts %>%
+  select(site, col, n) %>%
+  pivot_wider(names_from = col, values_from = n, values_fill = 0)
+resp_wide <- resp_wide %>%
+  select(site, sort(setdiff(names(resp_wide), "site")))
+```
+
+```{r summary-final}
+rhd_summary <- rhd_summary %>%
+  left_join(resp_wide, by = "site")
+
+rhd_summary <- rhd_summary %>%
+  bind_rows(
+    rhd_summary %>%
+      summarise(across(where(is.numeric), ~ sum(.x, na.rm = TRUE))) %>%
+      mutate(site = "Total")
+  ) %>%
+  # Follow-up proportion among RHD enrolled
+  mutate(pct_followup = round(n_followup / n_enrolled_rhd * 100, 1)) %>%
+  relocate(pct_followup, .after = n_followup)
+
+rhd_summary
+```
+
+# 7. RHD variables - summary by site
+
+Target records = RHD enrolled records (same definition as `n_enrolled_rhd`),
+using rows of the RHD event (`rhd_arm_1`).
+All variables matching `var_prefix` (default: starting with `rh`, i.e. `rh_`,
+`rhd_`, `rhf_`) are summarised by variable type and compared side by side across
+sites. Questions (field labels) and answers (choice labels) are taken from each
+site's data dictionary. Branching logic is applied per variable to set the
+denominator (same approach as the Data Status Report).
+
+Steps:
+
+1. Combined data dictionary - union of selected variables and choices across sites
+2. Site values filled in by the combined dictionary
+3. Completeness overview - one row per variable, answered / denominator per site
+4. Detail tables - one comparison table per variable
+
+## 7.1 Settings
+
+```{r trig-settings}
+site_labels <- c(MLW_HOS = "MLW", PGI_HOS = "PGI", MRCG_HOS = "MRCG")
+
+# Variables to compare (regex on field_name): rh_, rhd_, rhf_ ...
+var_prefix <- "^rh"
+
+# RHD event per site (NA = no event filter)
+map(dat_raw, ~ table(.x$redcap_event_name))
+target_event <- c(MLW_HOS = "rhd_arm_1", PGI_HOS = "rhd_arm_1", MRCG_HOS = NA)
+
+# System / helper fields to exclude
+exclude_pattern <- "_warn|_entdt_server|_entdt_now|_entby_web|_entby_app"
+
+# Completeness below this % is highlighted in the overview
+low_threshold <- 90
+
+# Variable mapping to MLW (reference) variables, one file per site
+# NA = site uses MLW variable names as is (a name check file is saved for it)
+varmap_dir  <- "varmap"
+varmap_file <- c(MLW_HOS  = NA,
+                 PGI_HOS  = file.path(varmap_dir, "SAVAC_HOS_varmap_PGI.xlsx"),
+                 MRCG_HOS = file.path(varmap_dir, "SAVAC_HOS_varmap_MRCG.xlsx"))
+
+# Target records per site
+target_ids <- list(
+  MLW_HOS  = mlw_rhd  %>% filter(!is.na(rh_ic) | !is.na(rh_no_ic)) %>% pull(record_id) %>% unique(),
+  PGI_HOS  = pgi_rhd  %>% filter(!is.na(rh_ic) | !is.na(rh_no_ic)) %>% pull(record_id) %>% unique(),
+  MRCG_HOS = mrcg_rhd %>% pull(record_id) %>% unique()
+)
+lengths(target_ids)
+
+# Forms containing the selected variables per site
+map(meta, ~ unique(.x$form_name[grepl(var_prefix, .x$field_name)]))
+```
+
+## 7.2 Functions
+
+```{r trig-functions}
+strip_html <- function(x) trimws(gsub("<.*?>", "", x))
+
+# Data dictionary of selected variables with variable type
+classify_fields <- function(m) {
+  m %>%
+    filter(grepl(var_prefix, field_name),
+           field_type != "descriptive",
+           !grepl(exclude_pattern, field_name)) %>%
+    mutate(
+      field_label = strip_html(field_label),
+      validation  = coalesce(text_validation_type_or_show_slider_number, ""),
+      var_type = case_when(
+        field_type %in% c("radio", "dropdown", "yesno", "truefalse")  ~ "Cate",
+        field_type == "checkbox"                                      ~ "Check",
+        field_type == "calc"                                          ~ "Calc",
+        field_type == "slider"                                        ~ "Cont",
+        field_type == "text" & grepl("^date", validation)             ~ "Date",
+        field_type == "text" & grepl("^time", validation)             ~ "Time",
+        field_type == "text" & grepl("^(number|integer)", validation) ~ "Cont",
+        TRUE                                                          ~ "Text"
+      ),
+      choices = case_when(
+        field_type == "yesno"     ~ "1, Yes | 0, No",
+        field_type == "truefalse" ~ "1, True | 0, False",
+        TRUE                      ~ select_choices_or_calculations
+      )
+    )
+}
+
+# "1, Yes | 0, No" -> code / label table
+parse_choices <- function(s) {
+  if (is.na(s) || s == "") return(tibble(code = character(), label = character()))
+  parts <- trimws(strsplit(s, "\\|")[[1]])
+  tibble(code  = trimws(sub(",.*$", "", parts)),
+         label = strip_html(sub("^[^,]*,", "", parts)))
+}
+
+# REDCap branching logic -> R expression
+logic_to_r <- function(x) {
+  if (is.na(x) || trimws(x) == "") return(NA_character_)
+  x <- gsub("\n", " ", x)
+  x <- gsub("\\[event-name\\]", "[redcap_event_name]", x)
+  x <- gsub("\\[[^]]*_arm_[^]]*\\]", "", x)                            # drop [event_arm_1] prefix
+  x <- gsub("\\]\\[current-instance\\]", "]", x)
+  x <- gsub("\\[(\\w+)\\(([A-Za-z0-9_]+)\\)\\]", "[\\1___\\2]", x)     # checkbox [var(1)]
+  x <- gsub("\\[(\\w+)\\]\\s*<>\\s*(''|\"\")", "!is.na(\\1)", x)
+  x <- gsub("\\[(\\w+)\\]\\s*=\\s*(''|\"\")", "is.na(\\1)", x)
+  x <- gsub("\\[(\\w+)\\]", "\\1", x)
+  x <- gsub("<>", "!=", x)
+  x <- gsub("(?<![<>!=])=(?!=)", "==", x, perl = TRUE)
+  x <- gsub("\\band\\b", "&", x, ignore.case = TRUE)
+  x <- gsub("\\bor\\b", "|", x, ignore.case = TRUE)
+  x
+}
+
+# Keep rows meeting branching logic; if logic cannot be evaluated, keep all rows
+apply_logic <- function(dat, logic) {
+  cond <- logic_to_r(logic)
+  if (is.na(cond)) return(list(dat = dat, applied = NA))
+  keep <- tryCatch(eval(parse(text = cond), envir = dat), error = function(e) NULL)
+  if (!is.null(keep) && length(keep) == 1) keep <- rep(keep, nrow(dat))
+  if (is.null(keep) || length(keep) != nrow(dat)) return(list(dat = dat, applied = FALSE))
+  list(dat = dat[keep %in% TRUE, , drop = FALSE], applied = TRUE)
+}
+
+# Rows of target records (in the given event) where any selected variable has a response
+get_form_rows <- function(df, dict, ids, event = NA) {
+  df <- df %>% filter(record_id %in% ids)
+  if (!is.na(event)) df <- df %>% filter(redcap_event_name == event)
+  check_fields <- dict$field_name[dict$var_type == "Check"]
+  other_fields <- dict$field_name[!dict$var_type %in% c("Check", "Calc")]
+  cols <- names(df)[names(df) %in% other_fields |
+                    sub("___.*$", "", names(df)) %in% check_fields]
+  if (length(cols) == 0 || nrow(df) == 0) return(df[0, ])
+  answered <- Reduce(`|`, lapply(cols, function(cl) {
+    if (grepl("___", cl)) df[[cl]] %in% c(1, "1")
+    else !is.na(df[[cl]]) & trimws(as.character(df[[cl]])) != ""
+  }))
+  df[answered, , drop = FALSE]
+}
+
+fmt_n_pct <- function(k, d) {
+  if (d == 0) return(as.character(k))
+  sprintf("%d (%.1f%%)", as.integer(k), k / d * 100)
+}
+fmt_num <- function(v, digits = 1) formatC(v, format = "f", digits = digits)
+
+# Summary of one variable for one site
+# d:  this site's dictionary row; mc: master choices of the field (code, label, ord)
+# tab: rows (row, value, ord); ord 900 = Missing / None checked, 999 = Total
+# k: number answered, n: denominator after branching logic
+# Choices not offered at this site are shown as "-"
+summarise_var <- function(dat, d, mc) {
+  lg  <- apply_logic(dat, d$branching_logic)
+  dat <- lg$dat
+  n   <- nrow(dat)
+  f   <- d$field_name
+  site_codes <- parse_choices(d$choices)$code
+
+  if (d$var_type != "Check" && !f %in% names(dat)) {
+    tab <- tibble(row = "Not exported", value = "-", ord = 1)
+    k   <- NA_integer_
+  } else if (d$var_type == "Cate") {
+    x   <- as.character(dat[[f]])
+    cnt <- vapply(mc$code, function(cd) sum(x %in% cd), integer(1))
+    val <- ifelse(mc$code %in% site_codes, fmt_n_pct(cnt, n), "-")
+    # Values not in the dictionary, shown as raw code
+    unk     <- setdiff(unique(na.omit(x)), mc$code)
+    unk_lab <- if (length(unk) > 0) paste0("[code ", unk, "]") else character(0)
+    unk_val <- if (length(unk) > 0) fmt_n_pct(vapply(unk, function(cd) sum(x %in% cd), integer(1)), n) else character(0)
+    k   <- sum(!is.na(x))
+    tab <- tibble(row   = c(mc$label, unk_lab, "Missing"),
+                  value = c(val, unk_val, fmt_n_pct(n - k, n)),
+                  ord   = c(mc$ord, 800 + seq_along(unk), 900))
+  } else if (d$var_type == "Check") {
+    cols <- paste0(f, "___", tolower(gsub("-", "_", mc$code)))
+    hit  <- lapply(cols, function(cl) if (cl %in% names(dat)) dat[[cl]] %in% c(1, "1") else NULL)
+    has  <- !vapply(hit, is.null, logical(1))
+    cnt  <- vapply(hit, function(h) if (is.null(h)) 0L else sum(h), integer(1))
+    none <- if (any(has)) sum(Reduce(`+`, hit[has]) == 0) else n
+    k    <- n - none
+    tab <- tibble(row   = c(mc$label, "None checked"),
+                  value = c(ifelse(has, fmt_n_pct(cnt, n), "-"), fmt_n_pct(none, n)),
+                  ord   = c(mc$ord, 900))
+  } else if (d$var_type %in% c("Cont", "Calc")) {
+    v <- suppressWarnings(as.numeric(as.character(dat[[f]])))
+    k <- sum(!is.na(v))
+    tab <- tibble(
+      row   = c("N", "Missing", "Mean (SD)", "Median", "Min, Max"),
+      value = c(as.character(k),
+                fmt_n_pct(n - k, n),
+                if (k > 0) paste0(fmt_num(mean(v, na.rm = TRUE)), " (", fmt_num(sd(v, na.rm = TRUE), 2), ")") else "-",
+                if (k > 0) fmt_num(median(v, na.rm = TRUE)) else "-",
+                if (k > 0) paste0(fmt_num(min(v, na.rm = TRUE)), ", ", fmt_num(max(v, na.rm = TRUE))) else "-"),
+      ord   = c(1, 900, 2, 3, 4)
+    )
+  } else if (d$var_type %in% c("Date", "Time")) {
+    v <- as.character(dat[[f]])
+    v <- v[!is.na(v) & v != ""]
+    k <- length(v)
+    tab <- tibble(row   = c("N", "Missing", "Min", "Max"),
+                  value = c(as.character(k), fmt_n_pct(n - k, n),
+                            if (k > 0) min(v) else "-", if (k > 0) max(v) else "-"),
+                  ord   = c(1, 900, 2, 3))
+  } else {
+    v <- as.character(dat[[f]])
+    answered <- !is.na(v) & trimws(v) != ""
+    k <- sum(answered)
+    tab <- tibble(row   = c("N", "Missing", "Unique values"),
+                  value = c(as.character(k), fmt_n_pct(n - k, n),
+                            as.character(length(unique(v[answered])))),
+                  ord   = c(1, 900, 2))
+  }
+
+  tab <- bind_rows(tab, tibble(row = "Total", value = as.character(n), ord = 999))
+  list(tab = tab, applied = lg$applied, k = as.integer(k), n = n)
+}
+
+# Detail comparison flextable for one variable (question label in header)
+make_compare_ft <- function(tab, header_n, question) {
+  ft <- flextable(tab)
+  ft <- set_header_labels(ft, values = c(list(row = question), as.list(header_n)))
+  ft <- bold(ft, i = ~ row == "Total")
+  ft <- color(ft, i = ~ row %in% c("Missing", "None checked"), j = 1, color = "#C00000")
+  ft <- bold(ft, i = ~ row %in% c("Missing", "None checked"), j = 1)
+  if (nrow(tab) > 1) ft <- hline(ft, i = nrow(tab) - 1, border = fp_border(width = 2))
+  ft <- align(ft, j = 2:ncol(tab), align = "center", part = "all")
+  ft <- width(ft, j = 1, width = 2.8)
+  ft <- width(ft, j = 2:ncol(tab), width = 1.3)
+  ft
+}
+```
+
+## 7.3 Harmonise sites to MLW variables
+
+Sites with a varmap file (PGI, MRCG) are converted to MLW variable names and coding:
+each `site_expr` is evaluated on one row per record (checkbox = checked in any
+row, other fields = first non-missing value; `row_filter` limits the rows used).
+The MLW data dictionary is then used for these sites, so questions, answers and
+order are the same as MLW. Unmapped MLW variables show as "Not in form".
+
+```{r harmonise}
+# Helpers available in varmap site_expr
+to_date <- function(x) as.Date(as.character(x))
+yn12    <- function(x) ifelse(x %in% 1, 1, ifelse(x %in% 0, 2, NA))   # yes/no 1/0 -> 1 Yes / 2 No
+chk     <- function(cond) as.integer(cond %in% TRUE)                   # condition -> checkbox 1/0
+
+first_value <- function(v) { x <- v[!is.na(v)]; if (length(x) > 0) x[1] else v[NA_integer_] }
+max_value   <- function(v) if (all(is.na(v))) NA_real_ else max(suppressWarnings(as.numeric(v)), na.rm = TRUE)
+
+# One row per record: checkbox columns = checked in any row, others = first non-missing value
+collapse_record <- function(d) {
+  d %>%
+    group_by(record_id) %>%
+    summarise(across(everything(),
+                     ~ if (grepl("___", cur_column())) max_value(.x) else first_value(.x)),
+              .groups = "drop")
+}
+
+# Convert one site's data to MLW variables using its varmap
+harmonise_site <- function(df, site_meta, vm, ids) {
+  vm <- vm %>%
+    mutate(across(everything(), ~ coalesce(as.character(.x), ""))) %>%
+    filter(ref_field != "", site_expr != "")
+  df <- df %>% filter(record_id %in% ids)
+
+  # Code -> choice label of a site field (used as lab("field", x) in site_expr)
+  lab <- function(field, x) {
+    ch <- parse_choices(site_meta$select_choices_or_calculations[site_meta$field_name == field][1])
+    ch$label[match(as.character(x), ch$code)]
+  }
+  env <- environment()
+
+  # Site columns used by expressions and filters
+  toks <- unique(unlist(regmatches(c(vm$site_expr, vm$row_filter),
+                                   gregexpr("[A-Za-z][A-Za-z0-9_]*", c(vm$site_expr, vm$row_filter)))))
+  used <- names(df)[names(df) %in% toks | sub("___.*$", "", names(df)) %in% toks]
+  cols <- unique(c("record_id", used))
+  rec  <- collapse_record(df[, cols, drop = FALSE])
+
+  out <- tibble(record_id = rec$record_id)
+  log <- vector("list", nrow(vm))
+  for (i in seq_len(nrow(vm))) {
+    ref  <- vm$ref_field[i]
+    expr <- vm$site_expr[i]
+    filt <- vm$row_filter[i]
+
+    dat <- rec
+    if (filt != "") {
+      keep <- tryCatch(eval(parse(text = filt), envir = df, enclos = env), error = function(e) NULL)
+      dat  <- if (is.null(keep)) rec[0, ] else collapse_record(df[keep %in% TRUE, cols, drop = FALSE])
+    }
+    m <- match(out$record_id, dat$record_id)
+
+    cb_cols <- if (grepl("^[A-Za-z0-9_]+$", expr)) grep(paste0("^", expr, "___"), names(dat), value = TRUE) else character(0)
+    if (!grepl("___", ref) && length(cb_cols) > 0) {
+      # Bare checkbox field: copy all options with the same codes
+      for (cl in cb_cols) out[[sub(paste0("^", expr), ref, cl)]] <- dat[[cl]][m]
+      status <- "ok"
+    } else {
+      val <- tryCatch(eval(parse(text = expr), envir = dat, enclos = env), error = function(e) e)
+      if (inherits(val, "error")) {
+        status <- conditionMessage(val)
+      } else {
+        if (length(val) == 1) val <- rep(val, nrow(dat))
+        out[[ref]] <- val[m]
+        status <- "ok"
+      }
+    }
+    log[[i]] <- tibble(ref_field = ref, site_expr = expr, status = status)
+  }
+
+  out <- out %>% mutate(redcap_event_name = NA_character_, redcap_repeat_instrument = NA_character_)
+  list(data = out, log = bind_rows(log))
+}
+
+# Read a varmap file: the .xlsx, or the .csv with the same name if the .xlsx is not there
+read_varmap <- function(path) {
+  if (file.exists(path)) return(read_excel(path, sheet = "varmap"))
+  csv <- sub("\\.xlsx$", ".csv", path)
+  if (!file.exists(csv)) stop("varmap file not found: ", path, " (or ", csv, ")")
+  tibble::as_tibble(read.csv(csv, fileEncoding = "UTF-8-BOM", na.strings = "",
+                             colClasses = "character", check.names = FALSE))
+}
+
+# Harmonise sites with a varmap file
+varmap <- map(varmap_file[!is.na(varmap_file)], read_varmap)
+
+# Rows with site fields filled in but no site_expr are not used (check these)
+map(varmap, ~ .x %>%
+      filter(!is.na(ref_field), !is.na(site_fields), is.na(site_expr)) %>%
+      select(ref_field, match, site_fields, note))
+
+harm   <- imap(varmap, function(vm, s) harmonise_site(dat_raw[[s]], meta[[s]], vm, target_ids[[s]]))
+
+# Expressions that could not be evaluated (should be empty)
+map(harm, ~ .x$log %>% filter(status != "ok"))
+
+# Data, dictionary and event used for the comparison
+dat_cmp   <- dat_raw
+meta_cmp  <- meta
+event_cmp <- target_event
+for (s in names(harm)) {
+  mapped         <- unique(sub("___.*$", "", names(harm[[s]]$data)))
+  dat_cmp[[s]]   <- harm[[s]]$data
+  meta_cmp[[s]]  <- meta$MLW_HOS %>% filter(field_name %in% mapped)
+  event_cmp[[s]] <- NA
+}
+map_int(meta_cmp, nrow)
+
+# Name check for sites using MLW names as is (saved as that site's matching file)
+ref_dict <- classify_fields(meta$MLW_HOS)
+for (s in setdiff(names(varmap_file)[is.na(varmap_file)], "MLW_HOS")) {
+  name_check <- ref_dict %>%
+    select(ref_field = field_name, ref_form = form_name, ref_label = field_label, ref_choices = choices) %>%
+    left_join(classify_fields(meta[[s]]) %>%
+                select(ref_field = field_name, site_label = field_label, site_choices = choices),
+              by = "ref_field") %>%
+    mutate(match = case_when(
+      is.na(site_label)                                                  ~ "Not available",
+      site_label == ref_label &
+        coalesce(site_choices, "") == coalesce(ref_choices, "")          ~ "Exact (same name)",
+      TRUE                                                               ~ "Same name, definition differs"
+    ))
+  dir.create(varmap_dir, showWarnings = FALSE)
+  write_xlsx(list(varmap = name_check),
+             file.path(varmap_dir, paste0("SAVAC_HOS_varmap_", site_labels[[s]], "_namecheck.xlsx")))
+  print(count(name_check, match))
+}
+```
+
+## 7.4 Analysis rows per site
+
+```{r trig-build}
+# Dictionary and analysis rows per site
+trig_dict <- map(meta_cmp, classify_fields)
+trig_rows <- imap(trig_dict, function(d, s) {
+  get_form_rows(dat_cmp[[s]], d, target_ids[[s]], event_cmp[[s]])
+})
+
+# Site overview
+trig_overview <- tibble(
+  site           = unname(site_labels[names(trig_dict)]),
+  source         = ifelse(is.na(varmap_file[names(trig_dict)]), "own variables", "mapped to MLW (varmap)"),
+  forms          = map_chr(trig_dict, ~ paste(unique(.x$form_name), collapse = ", ")),
+  n_fields       = map_int(trig_dict, nrow),
+  target_records = lengths(target_ids)[names(trig_dict)],
+  form_rows      = map_int(trig_rows, nrow),
+  form_records   = map_int(trig_rows, ~ n_distinct(.x$record_id))
+)
+trig_overview
+
+# Header labels with number of analysis rows per site
+header_n <- setNames(paste0(site_labels, "\n(n=", map_int(trig_rows, nrow)[names(site_labels)], ")"),
+                     site_labels)
+```
+
+## 7.5 Combined data dictionary
+
+One row per variable across all sites. Question, type, choices and branching
+logic come from the first site where the variable appears (MLW > PGI > MRCG);
+differences between sites are flagged in `issues`.
+
+```{r trig-dictionary}
+# Stop early if no variable matches var_prefix
+if (sum(map_int(trig_dict, nrow)) == 0) {
+  stop("No variables match var_prefix = '", var_prefix, "'. ",
+       "Check names with: map(meta, ~ grep(var_prefix, .x$field_name, value = TRUE))")
+}
+
+# All sites' dictionaries stacked (pos = order of first appearance)
+dict_all <- bind_rows(trig_dict, .id = "site_key") %>%
+  mutate(site = unname(site_labels[site_key]),
+         pos  = row_number())
+
+# Master dictionary: one row per variable
+master_dict <- dict_all %>%
+  group_by(field_name) %>%
+  summarise(
+    # Difference flags first (before the columns are collapsed to one value)
+    diff_type       = n_distinct(var_type) > 1,
+    diff_label      = n_distinct(field_label) > 1,
+    diff_choices    = n_distinct(coalesce(choices, "")) > 1,
+    diff_logic      = n_distinct(coalesce(branching_logic, "")) > 1,
+    sites           = paste(site, collapse = ", "),
+    pos             = min(pos),
+    form_name       = first(form_name),
+    var_type        = first(var_type),
+    field_label     = first(field_label),
+    choices         = first(choices),
+    branching_logic = first(branching_logic),
+    .groups = "drop"
+  ) %>%
+  arrange(pos) %>%
+  select(-pos)
+
+# Question label per site (side by side)
+label_by_site <- dict_all %>%
+  select(field_name, site, field_label) %>%
+  pivot_wider(names_from = site, values_from = field_label, names_prefix = "label_")
+
+# Text summary of differences for one variable
+make_issues <- function(sites, diff_type, diff_label, diff_choices, diff_logic) {
+  not_in <- setdiff(site_labels, strsplit(sites, ", ")[[1]])
+  paste(c(
+    if (length(not_in) > 0) paste0("Not in ", paste(not_in, collapse = ", ")),
+    if (diff_type)    "Type differs",
+    if (diff_label)   "Question differs",
+    if (diff_choices) "Choices differ",
+    if (diff_logic)   "Branching logic differs"
+  ), collapse = "; ")
+}
+
+master_dict <- master_dict %>%
+  left_join(label_by_site, by = "field_name")
+master_dict$issues <- pmap_chr(
+  master_dict[c("sites", "diff_type", "diff_label", "diff_choices", "diff_logic")],
+  make_issues
+)
+
+master_dict
+
+# Master choices: union of codes across sites (order: first site, then new codes)
+cate_dict <- dict_all %>% filter(var_type %in% c("Cate", "Check"))
+
+choices_all <- purrr::map_dfr(seq_len(nrow(cate_dict)), function(i) {
+  parse_choices(cate_dict$choices[i]) %>%
+    mutate(field_name = cate_dict$field_name[i],
+           site       = cate_dict$site[i],
+           .before = 1)
+})
+# Keep expected columns even when there are no categorical variables
+if (nrow(choices_all) == 0) {
+  choices_all <- tibble(field_name = character(), site = character(),
+                        code = character(), label = character())
+}
+
+master_choices <- choices_all %>%
+  distinct(field_name, code, .keep_all = TRUE) %>%
+  group_by(field_name) %>%
+  mutate(ord = row_number()) %>%
+  ungroup() %>%
+  select(field_name, code, label, ord)
+
+# Answer label per site (side by side) for checking
+choices_by_site <- master_choices %>%
+  left_join(choices_all %>%
+              select(field_name, code, site, site_label = label) %>%
+              pivot_wider(names_from = site, values_from = site_label, names_prefix = "label_"),
+            by = c("field_name", "code"))
+
+choices_by_site
+
+# Variables with differences between sites
+dict_issues <- master_dict %>%
+  filter(issues != "") %>%
+  select(field_name, field_label, sites, issues)
+dict_issues
+```
+
+## 7.6 Site values by master dictionary
+
+```{r trig-values}
+
+trig_compare <- map(seq_len(nrow(master_dict)), function(i) {
+  fld <- master_dict$field_name[i]
+  mc  <- master_choices %>% filter(field_name == fld) %>% select(code, label, ord)
+
+  # Summary per site (NULL if the field is not in that site's dictionary)
+  res <- imap(trig_dict, function(d, s) {
+    dd <- d %>% filter(field_name == fld)
+    if (nrow(dd) == 0) return(NULL)
+    summarise_var(trig_rows[[s]], dd[1, ], mc)
+  })
+
+  # Detail table
+  long <- imap_dfr(compact(res), ~ .x$tab %>%
+                     mutate(site = site_labels[[.y]], logic_applied = .x$applied))
+  wide <- long %>%
+    group_by(row) %>% mutate(ord = min(ord)) %>% ungroup() %>%
+    select(row, ord, site, value) %>%
+    pivot_wider(names_from = site, values_from = value, values_fill = "-") %>%
+    arrange(ord) %>%
+    select(-ord)
+  for (s in site_labels) if (!s %in% names(wide)) wide[[s]] <- "Not in form"
+  wide <- wide %>% select(row, all_of(unname(site_labels)))
+
+  # Completeness per site
+  comp <- imap_dfr(res, function(r, s) {
+    if (is.null(r)) return(tibble(site = site_labels[[s]], k = NA_integer_, n = NA_integer_,
+                                  pct = NA_real_, cell = "Not in form"))
+    if (is.na(r$k)) return(tibble(site = site_labels[[s]], k = NA_integer_, n = r$n,
+                                  pct = NA_real_, cell = "Not exported"))
+    pct <- if (r$n > 0) r$k / r$n * 100 else NA_real_
+    tibble(site = site_labels[[s]], k = r$k, n = r$n, pct = pct,
+           cell = if (r$n > 0) sprintf("%d/%d (%.0f%%)", r$k, r$n, pct) else "0/0")
+  })
+
+  list(
+    field      = fld,
+    label      = master_dict$field_label[i],
+    type       = master_dict$var_type[i],
+    logic      = master_dict$branching_logic[i],
+    issues     = master_dict$issues[i],
+    logic_fail = unique(long$site[long$logic_applied %in% FALSE]),
+    table      = wide,
+    comp       = comp
+  )
+})
+
+# Completeness overview (one row per variable)
+trig_completeness <- map_dfr(trig_compare, ~ .x$comp %>%
+                               mutate(field = .x$field, label = .x$label, type = .x$type, .before = 1))
+
+completeness_wide <- trig_completeness %>%
+  select(field, label, type, site, cell, pct) %>%
+  pivot_wider(names_from = site, values_from = c(cell, pct))
+
+overview_cells <- completeness_wide %>%
+  select(field, label, type, all_of(paste0("cell_", site_labels))) %>%
+  rename_with(~ sub("^cell_", "", .x))
+overview_pct <- completeness_wide %>%
+  select(all_of(paste0("pct_", site_labels))) %>%
+  rename_with(~ sub("^pct_", "", .x))
+
+overview_cells
+
+# Long table of all detail rows (for checking / Excel)
+trig_compare_long <- map_dfr(trig_compare, ~ .x$table %>%
+                               rename(response = row) %>%
+                               mutate(field = .x$field, question = .x$label, type = .x$type, .before = 1))
+trig_compare_long
+```
+
+# 8. RHD cases - counts, age groups, enrolment dates, ID lists
+
+Cases = RHD target records (section 7.1), one row per record. Uses the
+harmonised data (section 7.3), so all sites have MLW variables:
+enrolment date = `rh_ic_dt`, age = `rh_age_year` (or `rh_age_month` / `rh_age_day`
+if under 1 year). For MRCG these come from `cda_dt_con` and `cda_dob_cal_yrs`
+through the varmap file.
+
+## 8.1 Settings
+
+```{r cases-settings}
+# Age groups (completed years)
+age_breaks <- c(-Inf, 5, 15, 19, Inf)
+age_labels <- c("<5", "5-14", "15-18", "19+")
+```
+
+## 8.2 Build case list
+
+```{r cases-build}
+# One row per case: record_id, enrolment date, age
+build_cases <- function(s) {
+  df <- dat_cmp[[s]] %>% filter(record_id %in% target_ids[[s]])
+  if (!is.na(event_cmp[[s]])) df <- df %>% filter(redcap_event_name == event_cmp[[s]])
+  if ("redcap_repeat_instrument" %in% names(df)) df <- df %>% filter(is.na(redcap_repeat_instrument))
+
+  # Variables missing at a site are added as NA
+  for (v in c("rh_ic_dt", "rh_age_year", "rh_age_month", "rh_age_day")) {
+    if (!v %in% names(df)) {
+      warning(s, ": ", v, " not found")
+      df[[v]] <- NA
+    }
+  }
+
+  df %>%
+    transmute(
+      record_id = as.character(record_id),
+      enrol_dt  = to_date(rh_ic_dt),
+      # Age in years; months / days used only when years is missing (under 1 year)
+      age_years = coalesce(suppressWarnings(as.numeric(rh_age_year)),
+                           suppressWarnings(as.numeric(rh_age_month)) / 12,
+                           suppressWarnings(as.numeric(rh_age_day)) / 365.25)
+    ) %>%
+    # Collapse to one row per record (first non-missing value)
+    group_by(record_id) %>%
+    summarise(enrol_dt  = first_value(enrol_dt),
+              age_years = first_value(age_years),
+              .groups   = "drop") %>%
+    mutate(
+      age_group = cut(floor(age_years), breaks = age_breaks, labels = age_labels, right = FALSE),
+      age_group = factor(coalesce(as.character(age_group), "Missing"),
+                         levels = c(age_labels, "Missing"))
+    )
+}
+
+cases_all <- imap_dfr(site_labels, function(lbl, s) {
+  build_cases(s) %>% mutate(site = lbl, .before = 1)
+}) %>%
+  mutate(site = factor(site, levels = site_labels))
+
+# Duplicate check (should be empty)
+cases_all %>% count(site, record_id) %>% filter(n > 1)
+```
+
+## 8.3 Summary tables
+
+```{r cases-summary}
+safe_min <- function(x) if (all(is.na(x))) as.Date(NA) else min(x, na.rm = TRUE)
+safe_max <- function(x) if (all(is.na(x))) as.Date(NA) else max(x, na.rm = TRUE)
+
+# Total cases and enrolment date range per site
+case_summary <- cases_all %>%
+  group_by(site) %>%
+  summarise(n_cases          = n_distinct(record_id),
+            enrol_first      = safe_min(enrol_dt),
+            enrol_last       = safe_max(enrol_dt),
+            missing_enrol_dt = sum(is.na(enrol_dt)),
+            missing_age      = sum(is.na(age_years)),
+            .groups = "drop") %>%
+  mutate(site = as.character(site))
+
+case_summary <- case_summary %>%
+  bind_rows(tibble(site             = "Total",
+                   n_cases          = sum(case_summary$n_cases),
+                   enrol_first      = safe_min(case_summary$enrol_first),
+                   enrol_last       = safe_max(case_summary$enrol_last),
+                   missing_enrol_dt = sum(case_summary$missing_enrol_dt),
+                   missing_age      = sum(case_summary$missing_age)))
+case_summary
+
+# Cases by age group per site
+case_age <- cases_all %>%
+  count(site, age_group, .drop = FALSE) %>%
+  pivot_wider(names_from = age_group, values_from = n, values_fill = 0) %>%
+  mutate(site = as.character(site), Total = rowSums(across(-site)))
+
+case_age <- case_age %>%
+  bind_rows(case_age %>% summarise(across(where(is.numeric), sum)) %>% mutate(site = "Total"))
+case_age
+
+# ID list per site
+case_ids <- map(site_labels, function(lbl) {
+  cases_all %>%
+    filter(site == lbl) %>%
+    transmute(record_id, enrol_dt, age_years = round(age_years, 1), age_group) %>%
+    arrange(enrol_dt, record_id)
+}) %>%
+  set_names(paste0("ids_", site_labels))
+map_int(case_ids, nrow)
+```
+
+## 8.4 Save to Excel
+
+```{r cases-save}
+out_cases <- paste0("SAVAC_HOS_RHD_cases_", format(Sys.Date(), "%Y%m%d"), ".xlsx")
+write_xlsx(c(list(summary = case_summary, age_group = case_age), case_ids), out_cases)
+out_cases
+```
+
+# 9. Word report
+
+One Word file: RHD case summary first, then the RHD variable comparison (section 7).
+
+## 9.1 Case summary
+
+```{r word-cases}
+doc <- if (file.exists("DocStyle.docx")) read_docx("DocStyle.docx") else read_docx()
+
+fmt_date <- function(x) coalesce(format(x, "%d %b %Y"), "-")
+
+# Summary flextable: bold Total row with a line above it
+make_summary_ft <- function(df, labels = list()) {
+  ft <- flextable(df)
+  if (length(labels) > 0) ft <- set_header_labels(ft, values = labels)
+  tot <- which(df[[1]] == "Total")
+  if (length(tot) > 0) {
+    ft <- bold(ft, i = tot)
+    if (tot > 1) ft <- hline(ft, i = tot - 1, border = fp_border(width = 2))
+  }
+  ft <- align(ft, j = 2:ncol(df), align = "center", part = "all")
+  ft <- fontsize(ft, size = 9, part = "all")
+  autofit(ft)
+}
+
+doc <- body_add_par(doc, "Hospital - RHD cases", style = "heading 1")
+doc <- body_add_par(doc, paste0("Cases: RHD enrolled records. Created ", format(Sys.Date(), "%d %b %Y"), "."))
+
+# Number of cases and enrolment period
+doc <- body_add_par(doc, "Number of cases and enrolment period", style = "heading 2")
+cs <- case_summary %>% mutate(across(c(enrol_first, enrol_last), fmt_date))
+doc <- body_add_flextable(doc, make_summary_ft(cs, list(
+  site = "Site", n_cases = "Cases", enrol_first = "First enrolment", enrol_last = "Last enrolment",
+  missing_enrol_dt = "Missing enrolment date", missing_age = "Missing age")))
+doc <- body_add_par(doc, "Enrolment date = date of obtaining consent / assent (rh_ic_dt).")
+doc <- body_add_par(doc, "")
+
+# Number of cases by age group, n (% of site total)
+doc <- body_add_par(doc, "Number of cases by age group", style = "heading 2")
+ca <- case_age %>%
+  mutate(across(all_of(c(age_labels, "Missing")),
+                ~ sprintf("%d (%.1f%%)", as.integer(.x), ifelse(Total > 0, .x / Total * 100, 0))))
+doc <- body_add_flextable(doc, make_summary_ft(ca, list(site = "Site")))
+doc <- body_add_par(doc, "Age in completed years at enrolment; % of site total.")
+
+# Case ID list per site
+doc <- body_add_break(doc)
+doc <- body_add_par(doc, "Case ID list by site", style = "heading 2")
+for (nm in names(case_ids)) {
+  ids <- case_ids[[nm]] %>% mutate(enrol_dt = fmt_date(enrol_dt))
+  doc <- body_add_par(doc, paste0(sub("^ids_", "", nm), " (N = ", nrow(ids), ")"), style = "heading 3")
+  if (nrow(ids) == 0) {
+    doc <- body_add_par(doc, "No cases.")
+    next
+  }
+  ft <- flextable(ids)
+  ft <- set_header_labels(ft, record_id = "Record ID", enrol_dt = "Enrolment date",
+                          age_years = "Age (years)", age_group = "Age group")
+  ft <- align(ft, j = 2:4, align = "center", part = "all")
+  ft <- fontsize(ft, size = 8, part = "all")
+  ft <- autofit(ft)
+  doc <- body_add_flextable(doc, ft)
+  doc <- body_add_par(doc, "")
+}
+doc <- body_add_break(doc)
+```
+
+## 9.2 RHD variables summary by site
+
+```{r trig-word}
+doc <- body_add_par(doc, "Hospital - RHD variables summary by site", style = "heading 1")
+doc <- body_add_par(doc, paste0("Target records: RHD enrolled records. Created ", format(Sys.Date(), "%d %b %Y"), "."))
+
+# Site overview
+ft_site <- flextable(trig_overview)
+ft_site <- set_header_labels(ft_site, site = "Site", source = "Variables source", forms = "Form(s)",
+                             n_fields = "Variables", target_records = "Target records",
+                             form_rows = "Rows with data", form_records = "Records with data")
+ft_site <- align(ft_site, j = c("n_fields", "target_records", "form_rows", "form_records"),
+                 align = "center", part = "all")
+ft_site <- fontsize(ft_site, size = 9, part = "all")
+ft_site <- autofit(ft_site)
+doc <- body_add_flextable(doc, ft_site)
+doc <- body_add_par(doc, "")
+
+# Dictionary differences between sites
+doc <- body_add_par(doc, "Data dictionary differences", style = "heading 2")
+if (nrow(dict_issues) > 0) {
+  ft_iss <- flextable(dict_issues)
+  ft_iss <- set_header_labels(ft_iss, field_name = "Variable", field_label = "Question",
+                              sites = "Sites", issues = "Differences")
+  ft_iss <- fontsize(ft_iss, size = 8, part = "all")
+  ft_iss <- width(ft_iss, j = "field_name",  width = 1.2)
+  ft_iss <- width(ft_iss, j = "field_label", width = 2.4)
+  ft_iss <- width(ft_iss, j = "sites",       width = 1.0)
+  ft_iss <- width(ft_iss, j = "issues",      width = 2.0)
+  doc <- body_add_flextable(doc, ft_iss)
+} else {
+  doc <- body_add_par(doc, "All selected variables have the same definition across sites.")
+}
+doc <- body_add_par(doc, "")
+
+# Completeness overview
+doc <- body_add_par(doc, "Completeness overview", style = "heading 2")
+doc <- body_add_par(doc, paste0("Answered / denominator (after branching logic). Red: below ",
+                                low_threshold, "%. Grey: not in form or not exported."))
+
+ft_comp <- flextable(overview_cells)
+ft_comp <- set_header_labels(ft_comp, field = "Variable", label = "Question", type = "Type")
+for (s in site_labels) {
+  low <- which(!is.na(overview_pct[[s]]) & overview_pct[[s]] < low_threshold)
+  na  <- which(overview_cells[[s]] %in% c("Not in form", "Not exported"))
+  if (length(low) > 0) ft_comp <- bg(ft_comp, i = low, j = s, bg = "#F8D7DA")
+  if (length(na)  > 0) ft_comp <- bg(ft_comp, i = na,  j = s, bg = "#E7E6E6")
+}
+ft_comp <- align(ft_comp, j = c("type", site_labels), align = "center", part = "all")
+ft_comp <- fontsize(ft_comp, size = 8, part = "all")
+ft_comp <- width(ft_comp, j = "field", width = 1.2)
+ft_comp <- width(ft_comp, j = "label", width = 2.4)
+ft_comp <- width(ft_comp, j = "type",  width = 0.5)
+ft_comp <- width(ft_comp, j = site_labels, width = 1.0)
+doc <- body_add_flextable(doc, ft_comp)
+doc <- body_add_break(doc)
+
+# Detail tables
+doc <- body_add_par(doc, "Detail by variable", style = "heading 2")
+for (item in trig_compare) {
+  doc <- body_add_par(doc, item$label, style = "heading 3")
+
+  info <- paste0("Variable: ", item$field, " | Type: ", item$type)
+  if (!is.na(item$logic) && item$logic != "") info <- paste0(info, " | Branching logic: ", gsub("\n", " ", item$logic))
+  doc <- body_add_par(doc, info)
+  if (item$issues != "") doc <- body_add_par(doc, paste0("* Dictionary differences: ", item$issues))
+  if (length(item$logic_fail) > 0) {
+    doc <- body_add_par(doc, paste0("* Branching logic not applied (all rows used): ",
+                                    paste(item$logic_fail, collapse = ", ")))
+  }
+
+  doc <- body_add_flextable(doc, make_compare_ft(item$table, header_n, item$label))
+  doc <- body_add_par(doc, "")
+}
+
+out_docx <- paste0("SAVAC_HOS_RHD_report_", format(Sys.Date(), "%Y%m%d"), ".docx")
+print(doc, target = out_docx)
+out_docx
+```
+
+# 10. Save (optional)
+
+```{r save, eval=FALSE}
+writexl::write_xlsx(
+  list(rhd_summary   = rhd_summary,
+       rhd_responses = resp_counts,
+       rhd_sites      = trig_overview,
+       rhd_dictionary = master_dict,
+       rhd_choices    = choices_by_site,
+       rhd_overview   = overview_cells,
+       rhd_detail     = trig_compare_long),
+  paste0("SAVAC_hos_summary_", Sys.Date(), ".xlsx")
+)
+```

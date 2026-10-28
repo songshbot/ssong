@@ -1,0 +1,1810 @@
+SAVAC handoff bundle
+Each file starts at a marker line: five "=" signs, " FILE: ", the file path, five "=" signs.
+It ends at a marker line: five "=" signs, " END FILE ", five "=" signs.
+Save each file to its path exactly as written (UTF-8). Start by reading HANDOFF.md.
+
+===== FILE: HANDOFF.md =====
+# SAVAC REDCap 분석 - 작업 인수인계
+
+이 파일은 이전 세션(클라우드)에서 한 작업을 새 세션으로 넘기기 위한 메모입니다.
+같은 번들 파일 아래쪽에 코드와 매칭 표 원본이 모두 들어 있습니다.
+
+## 0. 새 세션에서 먼저 할 일
+
+1. 이 번들 파일에서 "FILE: 경로" 표시 줄부터 "END FILE" 표시 줄 사이를 각각 해당 경로의
+   파일로 저장한다 (번들 맨 위 설명 참고). 내용은 한 글자도 바꾸지 않는다.
+   - `SAVAC_hospital.Rmd`
+   - `SAVAC_community.Rmd`
+   - `varmap/SAVAC_HOS_varmap_MRCG.csv`
+   - `varmap/SAVAC_HOS_varmap_PGI.csv`
+   - (이 메모 자체는 `HANDOFF.md`로 저장)
+2. RMD는 `varmap/` 폴더를 RMD와 같은 위치에서 찾는다. xlsx가 없으면 같은 이름의 CSV를 읽는다.
+   CSV를 엑셀에서 열어 xlsx로 저장해도 된다(시트 이름은 `varmap`이어야 함).
+3. 지금까지 **가짜 데이터로만 테스트**했다. 실제 REDCap 데이터로 RMD를 처음부터 실행해서
+   오류와 결과를 확인하는 것이 다음 단계다.
+
+## 1. 사용자와 작업 방식
+
+- 대화는 한국어, **코드 주석은 항상 영어**.
+- 개수 확인은 함수/요약보다 "한 줄씩 쳐서 확인"하는 스타일을 선호한 적이 있음
+  (단, 최종 요약표와 워드 리포트도 원함).
+- 기존에 쓰던 리포트 스타일: officer + flextable로 워드 출력, `DocStyle.docx` 템플릿,
+  heading 1/2 스타일, Total 행 굵게 + 위에 굵은 선. (참고: MLW Community Data Status Report Rmd)
+- 사용자의 기존 Community 리포트 Rmd에는 MLW REDCap API 토큰이 코드에 그대로 적혀 있었음
+  → `.Renviron`으로 옮기라고 안내함.
+
+## 2. 데이터 접근
+
+- REDCap API: `https://ivirdc.ivi.int/api/`
+- 토큰: `C:/Users/saehyeun.song/Documents/.Renviron` 에 저장, `readRenviron()`으로 읽음
+  - `SAVAC_MLW_HOS_TOKEN_IVI`, `SAVAC_MLW_COMM_TOKEN_IVI`
+  - `SAVAC_PGI_HOS_TOKEN_PID181`, `SAVAC_PGI_COMM_TOKEN_PID180`
+  - `SAVAC_MRCG_HOS_TOKEN_IVI`, `SAVAC_MRCG_COMM_TOKEN_IVI`
+- 패키지: REDCapR(`redcap_read`, `redcap_metadata_read`), dplyr, tidyr, purrr, lubridate,
+  readxl, officer, flextable, writexl
+- raw와 label을 둘 다 받고, label 데이터는 raw와 **같은 행 번호**로 subset한다
+  (label에서는 이벤트명이 라벨로 바뀌어 필터가 안 되기 때문).
+
+## 3. Hospital (`SAVAC_hospital.Rmd`)
+
+### 사이트별 구조 (중요)
+- **MLW**: 질환별 form. RHD는 `rhd` + `rhd_followup` form, 이벤트 `rhd_arm_1`. MLW가 기준(reference).
+- **PGI**: MLW와 거의 같음. 차이:
+  - `rh_adm_dt` 없음 → `rh_enrol_from`(1 OPD / 2 IPD)에 따라 `rh_adm_opd_dt` / `rh_adm_ipd_dt`
+  - PGI에만: `rh_enrol_from`, `rh_opd_visit_dt`, `rh_enrol_opd`, `rh_visit_reason`, `rh_visit_reason_x`
+  - `rhf_disch_dt_na` 코드 3(OPD 등록), `rhf_rtn` 코드 3(waiver) 추가 → 표에 `[code 3]`으로 표시
+- **MRCG**: 공통 CRF 모듈 구조로 완전히 다름(cda_ 인구학, phr_ 병력, cin_ 검사, rhd_ RHD CRF 15개,
+  adm_ 입원/결과, fwu_ 추적). RHD 대상은 `rhd_ppc_adm___1~10` 중 하나라도 1인 레코드.
+  나이 `cda_dob_cal_yrs`(DOB→입원일 계산), 동의일 `cda_dt_con`.
+
+### 섹션 구성
+1-4. 로드, RHD 데이터셋(MLW/PGI: `rhd_arm_1` + `rh*` 변수만 / MRCG: rhd_ppc_adm 조건, 전체 변수), 중복 확인
+5. 개수 한 줄씩 확인
+   - 등록: MLW/PGI `rh_ic` 또는 `rh_no_ic` 응답 / MRCG `rhd_ppc_adm` 아무거나 1
+   - f/u: MLW/PGI `rhf_disch_dt` 또는 `rhf_disch_dt_na` / MRCG `fwu_dof` 또는 `fwu_tof_up`
+6. 요약표: `n_total`(전체 HOS 고유 record), `n_enrolled_rhd`, `n_followup`, `pct_followup`,
+   `rh_ic`/`rh_no_ic` 응답별 개수(고유 record 기준)
+7. RHD 변수 사이트별 비교
+   - 7.1 설정: `var_prefix <- "^rh"`, `target_event`, `varmap_file`(PGI, MRCG), `low_threshold <- 90`
+   - 7.2 함수: 변수 타입 분류(Cate/Check/Cont/Calc/Date/Time/Text), branching logic → R 변환,
+     타입별 요약(`summarise_var`), flextable
+   - 7.3 **Harmonise**: varmap 파일로 PGI/MRCG를 MLW 변수명·코딩으로 변환
+     (record당 1행: checkbox는 아무 행에서나 체크면 1, 나머지는 첫 non-missing).
+     식이 비어 있는데 site_fields만 적힌 행을 경고 목록으로 보여줌.
+   - 7.4 분석 행, 7.5 통합 Data Dictionary(사이트 간 차이 `issues`), 7.6 통합 선택지 기준으로 값 채우기
+8. RHD 케이스 요약: 사이트별 케이스 수, 등록일 범위(`rh_ic_dt`), 나이대별 수, 사이트별 ID 리스트
+   → `SAVAC_HOS_RHD_cases_YYYYMMDD.xlsx`
+9. 워드 리포트 `SAVAC_HOS_RHD_report_YYYYMMDD.docx`: 9.1 케이스 요약 표 → 9.2 변수 비교
+   (사이트 개요, dictionary 차이, 완성도 개요, 변수별 상세)
+10. 엑셀 저장(선택)
+
+### varmap 파일 규칙
+열: `ref_field, ref_form, ref_label, ref_type, ref_choices, match, site_expr, row_filter,
+site_fields, site_form, site_label, site_choices, note, confirmed`
+- RMD는 `site_expr`만 실행한다. 다른 열은 참고용.
+- `site_expr`: 사이트 데이터에서 MLW 코딩 값을 만드는 R 식. 체크박스 필드명만 쓰면 옵션 전체 복사.
+  헬퍼: `to_date(x)`, `yn12(x)`(1/0 → 1 Yes/2 No), `chk(cond)`(→ 1/0), `lab("field", x)`(코드→라벨)
+- `row_filter`: 그 조건을 만족하는 행만 사용 (MRCG follow-up은 `fwu_tof_up %in% 1` = 28일)
+
+### MRCG 매칭에서 정한 것 / 남은 것
+- MUAC: MLW mm, MRCG cm → ×10
+- `rh_disch_dt`: MRCG `adm_dod_dd`(퇴원일, 사망 시 사망일) → 결과가 사망(`adm_out_dis`=5)이면 NA
+- `rh_ic`: 본인 또는 부모 동의 있으면 1, 둘 다 0이면 2 (MRCG에 waiver 없음)
+- `rh_eval`: MRCG `cin_eco_rts`는 단일 선택, 중증도 변수 없음
+- `rh_med`: Benzathine→IM penicillin, Oral pen V→oral penicillin/Penicillin V, Erythromycin→Macrolide,
+  Warfarin→Anti-coagulants, Other cardiac→diuretics/anti-hypertensives/other (Approximate)
+- 진단(`rh_dgn_*`) ← `rhd_dcy_rhd` 1~4
+- **미정: `rh_arfhist`** (MLW는 Yes를 출처별 1~3으로 나눔, MRCG `phr_arf`는 Yes/No) → `site_expr` 비워 둠
+- 사용자가 varmap을 한 번 고쳤다가 "처음 버전이 맞다"고 해서 처음 버전 유지 중
+
+### 나이
+- 나이대: `<5`, `5-14`, `15-18`, `19+`, `Missing` (만 나이 = floor, 15세는 15-18)
+- "어린이/young child" 기준은 프로토콜 확인 필요 (임상적으로 young child는 보통 <5세,
+  RHD 연구의 children은 보통 5-14세). 한때 "요약은 14세 이하만"이라고 했다가 **취소함** → 현재 전체 나이.
+
+## 4. Community (`SAVAC_community.Rmd`)
+
+- baseline 이벤트(MLW/PGI `baseline_arm_1`, **MRCG `baseline_q0_arm_1`**)의 **repeat 아닌 행**에서
+  `bs_` 변수와 나이를 가져와 `trigger_arm_1` 레코드에 붙임 (`culture_analysis` repeat 행 때문에
+  repeat 행은 제외해야 함).
+- 나이: `bs_dob`(MRCG는 `bs_dob_known == 1`일 때만) ~ `bs_ic_dt` → 없으면 `bs_age_calc`
+  → 없으면 `bs_age_year`(+month). PGI는 DOB 대신 age_year만 있는 경우가 있음.
+  MRCG의 `bs_dob`는 실제 데이터에서 전부 비어 있었음 (de-identified export 가능성).
+- MRCG `record_id`는 숫자형, MLW는 문자형 → 합칠 때 문자형으로 통일.
+- 나이대별 사이트 요약표(`age_summary`, n (%) 버전).
+
+## 5. 다음 단계 (제안)
+
+1. 실제 데이터로 `SAVAC_hospital.Rmd` 전체 실행, 오류 수정
+2. 7.3 harmonise 로그와 "식 없는 매칭 행" 확인
+3. `rh_arfhist` 비교 방식 결정
+4. 어린이 나이 기준 결정 후 필요하면 요약에 반영
+5. 워드 리포트 레이아웃 실제 데이터로 확인 (`DocStyle.docx`에 heading 3 스타일이 없으면 오류 → heading 2로)
+===== END FILE =====
+
+===== FILE: SAVAC_hospital.Rmd =====
+---
+title: "SAVAC - Hospital RHD"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# 1. Setup
+
+```{r libraries}
+# install.packages(c("REDCapR", "dplyr", "tidyr", "purrr", "lubridate", "officer", "flextable", "writexl"))
+library(REDCapR)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(lubridate)
+library(readxl)
+library(officer)
+library(flextable)
+library(writexl)
+
+set_flextable_defaults(theme_fun = theme_vanilla)
+```
+
+# 2. Load data from REDCap
+
+```{r tokens}
+readRenviron("C:/Users/saehyeun.song/Documents/.Renviron")
+
+uri <- "https://ivirdc.ivi.int/api/"
+
+token_names <- c(
+  MLW_HOS  = "SAVAC_MLW_HOS_TOKEN_IVI",
+  PGI_HOS  = "SAVAC_PGI_HOS_TOKEN_PID181",
+  MRCG_HOS = "SAVAC_MRCG_HOS_TOKEN_IVI"
+)
+
+tokens <- Sys.getenv(token_names)
+names(tokens) <- names(token_names)
+
+# Stop if any token is missing
+missing <- names(tokens)[tokens == ""]
+if (length(missing) > 0) {
+  stop("Missing tokens in .Renviron: ", paste(token_names[missing], collapse = ", "))
+}
+```
+
+```{r load-functions}
+# Read records from one project ("raw" or "label")
+read_redcap <- function(token, site, raw_or_label = "raw") {
+  message("> ", site, " [", raw_or_label, "] loading...")
+  res <- REDCapR::redcap_read(
+    redcap_uri   = uri,
+    token        = token,
+    raw_or_label = raw_or_label,
+    batch_size   = 500,
+    verbose      = FALSE
+  )
+  if (!res$success) {
+    warning(site, " [", raw_or_label, "] failed: ", res$outcome_message)
+    return(NULL)
+  }
+  message("  OK: ", nrow(res$data), " rows / ", ncol(res$data), " cols")
+  res$data
+}
+
+# Read data dictionary from one project
+read_metadata <- function(token, site) {
+  message("> ", site, " [metadata] loading...")
+  res <- REDCapR::redcap_metadata_read(redcap_uri = uri, token = token, verbose = FALSE)
+  if (!res$success) {
+    warning(site, " [metadata] failed: ", res$outcome_message)
+    return(NULL)
+  }
+  res$data
+}
+```
+
+```{r load-data}
+dat_raw   <- imap(tokens, read_redcap, raw_or_label = "raw")    # coded values
+dat_label <- imap(tokens, read_redcap, raw_or_label = "label")  # choice labels
+meta      <- imap(tokens, read_metadata)                         # data dictionaries
+
+mlw_hos_raw  <- dat_raw$MLW_HOS
+pgi_hos_raw  <- dat_raw$PGI_HOS
+mrcg_hos_raw <- dat_raw$MRCG_HOS
+
+mlw_hos_lab  <- dat_label$MLW_HOS
+pgi_hos_lab  <- dat_label$PGI_HOS
+mrcg_hos_lab <- dat_label$MRCG_HOS
+
+mlw_hos_meta  <- meta$MLW_HOS
+pgi_hos_meta  <- meta$PGI_HOS
+mrcg_hos_meta <- meta$MRCG_HOS
+```
+
+# 3. Build RHD datasets
+
+- MLW / PGI: `redcap_event_name == "rhd_arm_1"`, keep ID/REDCap columns + variables starting with `rh`
+- MRCG: any `rhd_ppc_adm___1`-`___10` checked (== 1), keep all variables
+
+```{r rhd-datasets}
+# MLW
+mlw_rhd_idx <- which(mlw_hos_raw$redcap_event_name %in% "rhd_arm_1")
+mlw_rhd <- mlw_hos_raw[mlw_rhd_idx, ] %>%
+  select(record_id, starts_with("redcap_"), starts_with("rh"))
+mlw_rhd_lab <- mlw_hos_lab[mlw_rhd_idx, ] %>%
+  select(record_id, starts_with("redcap_"), starts_with("rh"))
+
+# PGI
+pgi_rhd_idx <- which(pgi_hos_raw$redcap_event_name %in% "rhd_arm_1")
+pgi_rhd <- pgi_hos_raw[pgi_rhd_idx, ] %>%
+  select(record_id, starts_with("redcap_"), starts_with("rh"))
+pgi_rhd_lab <- pgi_hos_lab[pgi_rhd_idx, ] %>%
+  select(record_id, starts_with("redcap_"), starts_with("rh"))
+
+# MRCG
+mrcg_rhd_idx <- which(rowSums(mrcg_hos_raw[grep("^rhd_ppc_adm___", names(mrcg_hos_raw))] == 1,
+                              na.rm = TRUE) > 0)
+mrcg_rhd     <- mrcg_hos_raw[mrcg_rhd_idx, ]
+mrcg_rhd_lab <- mrcg_hos_lab[mrcg_rhd_idx, ]
+```
+
+```{r rhd-dims}
+nrow(mlw_rhd);  ncol(mlw_rhd)
+nrow(pgi_rhd);  ncol(pgi_rhd)
+nrow(mrcg_rhd); ncol(mrcg_rhd)
+```
+
+# 4. Duplicate check
+
+```{r duplicates}
+# Rows vs unique record_id in full HOS datasets
+nrow(mlw_hos_raw);  n_distinct(mlw_hos_raw$record_id)
+nrow(pgi_hos_raw);  n_distinct(pgi_hos_raw$record_id)
+nrow(mrcg_hos_raw); n_distinct(mrcg_hos_raw$record_id)
+
+# Rows vs unique record_id in RHD datasets (should match if 1 row per record)
+nrow(mlw_rhd);  n_distinct(mlw_rhd$record_id)
+nrow(pgi_rhd);  n_distinct(pgi_rhd$record_id)
+nrow(mrcg_rhd); n_distinct(mrcg_rhd$record_id)
+
+# Duplicated record_id in RHD datasets (if any)
+mlw_rhd  %>% count(record_id) %>% filter(n > 1)
+pgi_rhd  %>% count(record_id) %>% filter(n > 1)
+mrcg_rhd %>% count(record_id) %>% filter(n > 1)
+```
+
+# 5. Counts step by step
+
+## 5.1 Enrolled
+
+- MLW / PGI: `rh_ic` OR `rh_no_ic` answered
+- MRCG: any `rhd_ppc_adm` option == 1
+
+```{r enrolled}
+mlw_rhd  %>% filter(!is.na(rh_ic) | !is.na(rh_no_ic)) %>% nrow()
+pgi_rhd  %>% filter(!is.na(rh_ic) | !is.na(rh_no_ic)) %>% nrow()
+mrcg_rhd %>% filter(if_any(starts_with("rhd_ppc_adm___"), ~ .x == 1)) %>% nrow()
+
+# Response distribution
+table(mlw_rhd$rh_ic,    useNA = "ifany")
+table(mlw_rhd$rh_no_ic, useNA = "ifany")
+table(pgi_rhd$rh_ic,    useNA = "ifany")
+table(pgi_rhd$rh_no_ic, useNA = "ifany")
+```
+
+## 5.2 MRCG - rhd_ppc_adm options
+
+```{r mrcg-ppc}
+sum(mrcg_rhd$rhd_ppc_adm___1  == 1, na.rm = TRUE)  # Shortness of breath
+sum(mrcg_rhd$rhd_ppc_adm___2  == 1, na.rm = TRUE)  # Chest pain
+sum(mrcg_rhd$rhd_ppc_adm___3  == 1, na.rm = TRUE)  # Swelling
+sum(mrcg_rhd$rhd_ppc_adm___4  == 1, na.rm = TRUE)  # New murmur
+sum(mrcg_rhd$rhd_ppc_adm___5  == 1, na.rm = TRUE)  # Infective endocarditis
+sum(mrcg_rhd$rhd_ppc_adm___6  == 1, na.rm = TRUE)  # Cardiac failure
+sum(mrcg_rhd$rhd_ppc_adm___7  == 1, na.rm = TRUE)  # Cardiac failure in pregnancy
+sum(mrcg_rhd$rhd_ppc_adm___8  == 1, na.rm = TRUE)  # Atrial fibrillation
+sum(mrcg_rhd$rhd_ppc_adm___9  == 1, na.rm = TRUE)  # Stroke
+sum(mrcg_rhd$rhd_ppc_adm___10 == 1, na.rm = TRUE)  # Other
+```
+
+## 5.3 Follow-up
+
+- MLW / PGI: `rhf_disch_dt` OR `rhf_disch_dt_na` answered
+- MRCG: `fwu_dof` OR `fwu_tof_up` answered
+
+```{r followup}
+mlw_rhd  %>% filter(!is.na(rhf_disch_dt) | !is.na(rhf_disch_dt_na)) %>% nrow()
+pgi_rhd  %>% filter(!is.na(rhf_disch_dt) | !is.na(rhf_disch_dt_na)) %>% nrow()
+mrcg_rhd %>% filter(!is.na(fwu_dof) | !is.na(fwu_tof_up)) %>% nrow()
+
+sum(!is.na(mrcg_rhd$fwu_dof))
+sum(!is.na(mrcg_rhd$fwu_tof_up))
+```
+
+# 6. Summary table
+
+```{r summary-base}
+rhd_summary <- tibble(
+  site = c("MLW", "PGI", "MRCG"),
+
+  # Unique records in full HOS dataset
+  n_total = c(
+    n_distinct(mlw_hos_raw$record_id),
+    n_distinct(pgi_hos_raw$record_id),
+    n_distinct(mrcg_hos_raw$record_id)
+  ),
+
+  # Enrolled in RHD: rh_ic OR rh_no_ic (MLW/PGI), any rhd_ppc_adm == 1 (MRCG)
+  n_enrolled_rhd = c(
+    mlw_rhd  %>% filter(!is.na(rh_ic) | !is.na(rh_no_ic)) %>% distinct(record_id) %>% nrow(),
+    pgi_rhd  %>% filter(!is.na(rh_ic) | !is.na(rh_no_ic)) %>% distinct(record_id) %>% nrow(),
+    mrcg_rhd %>% filter(if_any(starts_with("rhd_ppc_adm___"), ~ .x == 1)) %>% distinct(record_id) %>% nrow()
+  ),
+
+  # Follow-up: rhf_disch_dt OR rhf_disch_dt_na (MLW/PGI), fwu_dof OR fwu_tof_up (MRCG)
+  n_followup = c(
+    mlw_rhd  %>% filter(!is.na(rhf_disch_dt) | !is.na(rhf_disch_dt_na)) %>% distinct(record_id) %>% nrow(),
+    pgi_rhd  %>% filter(!is.na(rhf_disch_dt) | !is.na(rhf_disch_dt_na)) %>% distinct(record_id) %>% nrow(),
+    mrcg_rhd %>% filter(!is.na(fwu_dof) | !is.na(fwu_tof_up)) %>% distinct(record_id) %>% nrow()
+  )
+)
+```
+
+```{r summary-response}
+# Response codes for rh_ic / rh_no_ic
+mlw_hos_meta %>%
+  filter(field_name %in% c("rh_ic", "rh_no_ic")) %>%
+  select(field_name, select_choices_or_calculations)
+
+# Count unique records per response value; skip if variable not in dataset
+count_resp <- function(df, var, site) {
+  if (!var %in% names(df)) return(NULL)
+  df %>%
+    filter(!is.na(.data[[var]])) %>%
+    distinct(record_id, value = as.character(.data[[var]])) %>%
+    count(value) %>%
+    mutate(site = site, col = paste0(var, "_", value))
+}
+
+resp_counts <- bind_rows(
+  count_resp(mlw_rhd,  "rh_ic",    "MLW"),
+  count_resp(mlw_rhd,  "rh_no_ic", "MLW"),
+  count_resp(pgi_rhd,  "rh_ic",    "PGI"),
+  count_resp(pgi_rhd,  "rh_no_ic", "PGI"),
+  count_resp(mrcg_rhd, "rh_ic",    "MRCG"),
+  count_resp(mrcg_rhd, "rh_no_ic", "MRCG")
+)
+
+# Long format
+resp_counts %>% select(site, col, n)
+
+# Wide format: one column per response
+resp_wide <- resp_counts %>%
+  select(site, col, n) %>%
+  pivot_wider(names_from = col, values_from = n, values_fill = 0)
+resp_wide <- resp_wide %>%
+  select(site, sort(setdiff(names(resp_wide), "site")))
+```
+
+```{r summary-final}
+rhd_summary <- rhd_summary %>%
+  left_join(resp_wide, by = "site")
+
+rhd_summary <- rhd_summary %>%
+  bind_rows(
+    rhd_summary %>%
+      summarise(across(where(is.numeric), ~ sum(.x, na.rm = TRUE))) %>%
+      mutate(site = "Total")
+  ) %>%
+  # Follow-up proportion among RHD enrolled
+  mutate(pct_followup = round(n_followup / n_enrolled_rhd * 100, 1)) %>%
+  relocate(pct_followup, .after = n_followup)
+
+rhd_summary
+```
+
+# 7. RHD variables - summary by site
+
+Target records = RHD enrolled records (same definition as `n_enrolled_rhd`),
+using rows of the RHD event (`rhd_arm_1`).
+All variables matching `var_prefix` (default: starting with `rh`, i.e. `rh_`,
+`rhd_`, `rhf_`) are summarised by variable type and compared side by side across
+sites. Questions (field labels) and answers (choice labels) are taken from each
+site's data dictionary. Branching logic is applied per variable to set the
+denominator (same approach as the Data Status Report).
+
+Steps:
+
+1. Combined data dictionary - union of selected variables and choices across sites
+2. Site values filled in by the combined dictionary
+3. Completeness overview - one row per variable, answered / denominator per site
+4. Detail tables - one comparison table per variable
+
+## 7.1 Settings
+
+```{r trig-settings}
+site_labels <- c(MLW_HOS = "MLW", PGI_HOS = "PGI", MRCG_HOS = "MRCG")
+
+# Variables to compare (regex on field_name): rh_, rhd_, rhf_ ...
+var_prefix <- "^rh"
+
+# RHD event per site (NA = no event filter)
+map(dat_raw, ~ table(.x$redcap_event_name))
+target_event <- c(MLW_HOS = "rhd_arm_1", PGI_HOS = "rhd_arm_1", MRCG_HOS = NA)
+
+# System / helper fields to exclude
+exclude_pattern <- "_warn|_entdt_server|_entdt_now|_entby_web|_entby_app"
+
+# Completeness below this % is highlighted in the overview
+low_threshold <- 90
+
+# Variable mapping to MLW (reference) variables, one file per site
+# NA = site uses MLW variable names as is (a name check file is saved for it)
+varmap_dir  <- "varmap"
+varmap_file <- c(MLW_HOS  = NA,
+                 PGI_HOS  = file.path(varmap_dir, "SAVAC_HOS_varmap_PGI.xlsx"),
+                 MRCG_HOS = file.path(varmap_dir, "SAVAC_HOS_varmap_MRCG.xlsx"))
+
+# Target records per site
+target_ids <- list(
+  MLW_HOS  = mlw_rhd  %>% filter(!is.na(rh_ic) | !is.na(rh_no_ic)) %>% pull(record_id) %>% unique(),
+  PGI_HOS  = pgi_rhd  %>% filter(!is.na(rh_ic) | !is.na(rh_no_ic)) %>% pull(record_id) %>% unique(),
+  MRCG_HOS = mrcg_rhd %>% pull(record_id) %>% unique()
+)
+lengths(target_ids)
+
+# Forms containing the selected variables per site
+map(meta, ~ unique(.x$form_name[grepl(var_prefix, .x$field_name)]))
+```
+
+## 7.2 Functions
+
+```{r trig-functions}
+strip_html <- function(x) trimws(gsub("<.*?>", "", x))
+
+# Data dictionary of selected variables with variable type
+classify_fields <- function(m) {
+  m %>%
+    filter(grepl(var_prefix, field_name),
+           field_type != "descriptive",
+           !grepl(exclude_pattern, field_name)) %>%
+    mutate(
+      field_label = strip_html(field_label),
+      validation  = coalesce(text_validation_type_or_show_slider_number, ""),
+      var_type = case_when(
+        field_type %in% c("radio", "dropdown", "yesno", "truefalse")  ~ "Cate",
+        field_type == "checkbox"                                      ~ "Check",
+        field_type == "calc"                                          ~ "Calc",
+        field_type == "slider"                                        ~ "Cont",
+        field_type == "text" & grepl("^date", validation)             ~ "Date",
+        field_type == "text" & grepl("^time", validation)             ~ "Time",
+        field_type == "text" & grepl("^(number|integer)", validation) ~ "Cont",
+        TRUE                                                          ~ "Text"
+      ),
+      choices = case_when(
+        field_type == "yesno"     ~ "1, Yes | 0, No",
+        field_type == "truefalse" ~ "1, True | 0, False",
+        TRUE                      ~ select_choices_or_calculations
+      )
+    )
+}
+
+# "1, Yes | 0, No" -> code / label table
+parse_choices <- function(s) {
+  if (is.na(s) || s == "") return(tibble(code = character(), label = character()))
+  parts <- trimws(strsplit(s, "\\|")[[1]])
+  tibble(code  = trimws(sub(",.*$", "", parts)),
+         label = strip_html(sub("^[^,]*,", "", parts)))
+}
+
+# REDCap branching logic -> R expression
+logic_to_r <- function(x) {
+  if (is.na(x) || trimws(x) == "") return(NA_character_)
+  x <- gsub("\n", " ", x)
+  x <- gsub("\\[event-name\\]", "[redcap_event_name]", x)
+  x <- gsub("\\[[^]]*_arm_[^]]*\\]", "", x)                            # drop [event_arm_1] prefix
+  x <- gsub("\\]\\[current-instance\\]", "]", x)
+  x <- gsub("\\[(\\w+)\\(([A-Za-z0-9_]+)\\)\\]", "[\\1___\\2]", x)     # checkbox [var(1)]
+  x <- gsub("\\[(\\w+)\\]\\s*<>\\s*(''|\"\")", "!is.na(\\1)", x)
+  x <- gsub("\\[(\\w+)\\]\\s*=\\s*(''|\"\")", "is.na(\\1)", x)
+  x <- gsub("\\[(\\w+)\\]", "\\1", x)
+  x <- gsub("<>", "!=", x)
+  x <- gsub("(?<![<>!=])=(?!=)", "==", x, perl = TRUE)
+  x <- gsub("\\band\\b", "&", x, ignore.case = TRUE)
+  x <- gsub("\\bor\\b", "|", x, ignore.case = TRUE)
+  x
+}
+
+# Keep rows meeting branching logic; if logic cannot be evaluated, keep all rows
+apply_logic <- function(dat, logic) {
+  cond <- logic_to_r(logic)
+  if (is.na(cond)) return(list(dat = dat, applied = NA))
+  keep <- tryCatch(eval(parse(text = cond), envir = dat), error = function(e) NULL)
+  if (!is.null(keep) && length(keep) == 1) keep <- rep(keep, nrow(dat))
+  if (is.null(keep) || length(keep) != nrow(dat)) return(list(dat = dat, applied = FALSE))
+  list(dat = dat[keep %in% TRUE, , drop = FALSE], applied = TRUE)
+}
+
+# Rows of target records (in the given event) where any selected variable has a response
+get_form_rows <- function(df, dict, ids, event = NA) {
+  df <- df %>% filter(record_id %in% ids)
+  if (!is.na(event)) df <- df %>% filter(redcap_event_name == event)
+  check_fields <- dict$field_name[dict$var_type == "Check"]
+  other_fields <- dict$field_name[!dict$var_type %in% c("Check", "Calc")]
+  cols <- names(df)[names(df) %in% other_fields |
+                    sub("___.*$", "", names(df)) %in% check_fields]
+  if (length(cols) == 0 || nrow(df) == 0) return(df[0, ])
+  answered <- Reduce(`|`, lapply(cols, function(cl) {
+    if (grepl("___", cl)) df[[cl]] %in% c(1, "1")
+    else !is.na(df[[cl]]) & trimws(as.character(df[[cl]])) != ""
+  }))
+  df[answered, , drop = FALSE]
+}
+
+fmt_n_pct <- function(k, d) {
+  if (d == 0) return(as.character(k))
+  sprintf("%d (%.1f%%)", as.integer(k), k / d * 100)
+}
+fmt_num <- function(v, digits = 1) formatC(v, format = "f", digits = digits)
+
+# Summary of one variable for one site
+# d:  this site's dictionary row; mc: master choices of the field (code, label, ord)
+# tab: rows (row, value, ord); ord 900 = Missing / None checked, 999 = Total
+# k: number answered, n: denominator after branching logic
+# Choices not offered at this site are shown as "-"
+summarise_var <- function(dat, d, mc) {
+  lg  <- apply_logic(dat, d$branching_logic)
+  dat <- lg$dat
+  n   <- nrow(dat)
+  f   <- d$field_name
+  site_codes <- parse_choices(d$choices)$code
+
+  if (d$var_type != "Check" && !f %in% names(dat)) {
+    tab <- tibble(row = "Not exported", value = "-", ord = 1)
+    k   <- NA_integer_
+  } else if (d$var_type == "Cate") {
+    x   <- as.character(dat[[f]])
+    cnt <- vapply(mc$code, function(cd) sum(x %in% cd), integer(1))
+    val <- ifelse(mc$code %in% site_codes, fmt_n_pct(cnt, n), "-")
+    # Values not in the dictionary, shown as raw code
+    unk     <- setdiff(unique(na.omit(x)), mc$code)
+    unk_lab <- if (length(unk) > 0) paste0("[code ", unk, "]") else character(0)
+    unk_val <- if (length(unk) > 0) fmt_n_pct(vapply(unk, function(cd) sum(x %in% cd), integer(1)), n) else character(0)
+    k   <- sum(!is.na(x))
+    tab <- tibble(row   = c(mc$label, unk_lab, "Missing"),
+                  value = c(val, unk_val, fmt_n_pct(n - k, n)),
+                  ord   = c(mc$ord, 800 + seq_along(unk), 900))
+  } else if (d$var_type == "Check") {
+    cols <- paste0(f, "___", tolower(gsub("-", "_", mc$code)))
+    hit  <- lapply(cols, function(cl) if (cl %in% names(dat)) dat[[cl]] %in% c(1, "1") else NULL)
+    has  <- !vapply(hit, is.null, logical(1))
+    cnt  <- vapply(hit, function(h) if (is.null(h)) 0L else sum(h), integer(1))
+    none <- if (any(has)) sum(Reduce(`+`, hit[has]) == 0) else n
+    k    <- n - none
+    tab <- tibble(row   = c(mc$label, "None checked"),
+                  value = c(ifelse(has, fmt_n_pct(cnt, n), "-"), fmt_n_pct(none, n)),
+                  ord   = c(mc$ord, 900))
+  } else if (d$var_type %in% c("Cont", "Calc")) {
+    v <- suppressWarnings(as.numeric(as.character(dat[[f]])))
+    k <- sum(!is.na(v))
+    tab <- tibble(
+      row   = c("N", "Missing", "Mean (SD)", "Median", "Min, Max"),
+      value = c(as.character(k),
+                fmt_n_pct(n - k, n),
+                if (k > 0) paste0(fmt_num(mean(v, na.rm = TRUE)), " (", fmt_num(sd(v, na.rm = TRUE), 2), ")") else "-",
+                if (k > 0) fmt_num(median(v, na.rm = TRUE)) else "-",
+                if (k > 0) paste0(fmt_num(min(v, na.rm = TRUE)), ", ", fmt_num(max(v, na.rm = TRUE))) else "-"),
+      ord   = c(1, 900, 2, 3, 4)
+    )
+  } else if (d$var_type %in% c("Date", "Time")) {
+    v <- as.character(dat[[f]])
+    v <- v[!is.na(v) & v != ""]
+    k <- length(v)
+    tab <- tibble(row   = c("N", "Missing", "Min", "Max"),
+                  value = c(as.character(k), fmt_n_pct(n - k, n),
+                            if (k > 0) min(v) else "-", if (k > 0) max(v) else "-"),
+                  ord   = c(1, 900, 2, 3))
+  } else {
+    v <- as.character(dat[[f]])
+    answered <- !is.na(v) & trimws(v) != ""
+    k <- sum(answered)
+    tab <- tibble(row   = c("N", "Missing", "Unique values"),
+                  value = c(as.character(k), fmt_n_pct(n - k, n),
+                            as.character(length(unique(v[answered])))),
+                  ord   = c(1, 900, 2))
+  }
+
+  tab <- bind_rows(tab, tibble(row = "Total", value = as.character(n), ord = 999))
+  list(tab = tab, applied = lg$applied, k = as.integer(k), n = n)
+}
+
+# Detail comparison flextable for one variable (question label in header)
+make_compare_ft <- function(tab, header_n, question) {
+  ft <- flextable(tab)
+  ft <- set_header_labels(ft, values = c(list(row = question), as.list(header_n)))
+  ft <- bold(ft, i = ~ row == "Total")
+  ft <- color(ft, i = ~ row %in% c("Missing", "None checked"), j = 1, color = "#C00000")
+  ft <- bold(ft, i = ~ row %in% c("Missing", "None checked"), j = 1)
+  if (nrow(tab) > 1) ft <- hline(ft, i = nrow(tab) - 1, border = fp_border(width = 2))
+  ft <- align(ft, j = 2:ncol(tab), align = "center", part = "all")
+  ft <- width(ft, j = 1, width = 2.8)
+  ft <- width(ft, j = 2:ncol(tab), width = 1.3)
+  ft
+}
+```
+
+## 7.3 Harmonise sites to MLW variables
+
+Sites with a varmap file (PGI, MRCG) are converted to MLW variable names and coding:
+each `site_expr` is evaluated on one row per record (checkbox = checked in any
+row, other fields = first non-missing value; `row_filter` limits the rows used).
+The MLW data dictionary is then used for these sites, so questions, answers and
+order are the same as MLW. Unmapped MLW variables show as "Not in form".
+
+```{r harmonise}
+# Helpers available in varmap site_expr
+to_date <- function(x) as.Date(as.character(x))
+yn12    <- function(x) ifelse(x %in% 1, 1, ifelse(x %in% 0, 2, NA))   # yes/no 1/0 -> 1 Yes / 2 No
+chk     <- function(cond) as.integer(cond %in% TRUE)                   # condition -> checkbox 1/0
+
+first_value <- function(v) { x <- v[!is.na(v)]; if (length(x) > 0) x[1] else v[NA_integer_] }
+max_value   <- function(v) if (all(is.na(v))) NA_real_ else max(suppressWarnings(as.numeric(v)), na.rm = TRUE)
+
+# One row per record: checkbox columns = checked in any row, others = first non-missing value
+collapse_record <- function(d) {
+  d %>%
+    group_by(record_id) %>%
+    summarise(across(everything(),
+                     ~ if (grepl("___", cur_column())) max_value(.x) else first_value(.x)),
+              .groups = "drop")
+}
+
+# Convert one site's data to MLW variables using its varmap
+harmonise_site <- function(df, site_meta, vm, ids) {
+  vm <- vm %>%
+    mutate(across(everything(), ~ coalesce(as.character(.x), ""))) %>%
+    filter(ref_field != "", site_expr != "")
+  df <- df %>% filter(record_id %in% ids)
+
+  # Code -> choice label of a site field (used as lab("field", x) in site_expr)
+  lab <- function(field, x) {
+    ch <- parse_choices(site_meta$select_choices_or_calculations[site_meta$field_name == field][1])
+    ch$label[match(as.character(x), ch$code)]
+  }
+  env <- environment()
+
+  # Site columns used by expressions and filters
+  toks <- unique(unlist(regmatches(c(vm$site_expr, vm$row_filter),
+                                   gregexpr("[A-Za-z][A-Za-z0-9_]*", c(vm$site_expr, vm$row_filter)))))
+  used <- names(df)[names(df) %in% toks | sub("___.*$", "", names(df)) %in% toks]
+  cols <- unique(c("record_id", used))
+  rec  <- collapse_record(df[, cols, drop = FALSE])
+
+  out <- tibble(record_id = rec$record_id)
+  log <- vector("list", nrow(vm))
+  for (i in seq_len(nrow(vm))) {
+    ref  <- vm$ref_field[i]
+    expr <- vm$site_expr[i]
+    filt <- vm$row_filter[i]
+
+    dat <- rec
+    if (filt != "") {
+      keep <- tryCatch(eval(parse(text = filt), envir = df, enclos = env), error = function(e) NULL)
+      dat  <- if (is.null(keep)) rec[0, ] else collapse_record(df[keep %in% TRUE, cols, drop = FALSE])
+    }
+    m <- match(out$record_id, dat$record_id)
+
+    cb_cols <- if (grepl("^[A-Za-z0-9_]+$", expr)) grep(paste0("^", expr, "___"), names(dat), value = TRUE) else character(0)
+    if (!grepl("___", ref) && length(cb_cols) > 0) {
+      # Bare checkbox field: copy all options with the same codes
+      for (cl in cb_cols) out[[sub(paste0("^", expr), ref, cl)]] <- dat[[cl]][m]
+      status <- "ok"
+    } else {
+      val <- tryCatch(eval(parse(text = expr), envir = dat, enclos = env), error = function(e) e)
+      if (inherits(val, "error")) {
+        status <- conditionMessage(val)
+      } else {
+        if (length(val) == 1) val <- rep(val, nrow(dat))
+        out[[ref]] <- val[m]
+        status <- "ok"
+      }
+    }
+    log[[i]] <- tibble(ref_field = ref, site_expr = expr, status = status)
+  }
+
+  out <- out %>% mutate(redcap_event_name = NA_character_, redcap_repeat_instrument = NA_character_)
+  list(data = out, log = bind_rows(log))
+}
+
+# Read a varmap file: the .xlsx, or the .csv with the same name if the .xlsx is not there
+read_varmap <- function(path) {
+  if (file.exists(path)) return(read_excel(path, sheet = "varmap"))
+  csv <- sub("\\.xlsx$", ".csv", path)
+  if (!file.exists(csv)) stop("varmap file not found: ", path, " (or ", csv, ")")
+  tibble::as_tibble(read.csv(csv, fileEncoding = "UTF-8-BOM", na.strings = "",
+                             colClasses = "character", check.names = FALSE))
+}
+
+# Harmonise sites with a varmap file
+varmap <- map(varmap_file[!is.na(varmap_file)], read_varmap)
+
+# Rows with site fields filled in but no site_expr are not used (check these)
+map(varmap, ~ .x %>%
+      filter(!is.na(ref_field), !is.na(site_fields), is.na(site_expr)) %>%
+      select(ref_field, match, site_fields, note))
+
+harm   <- imap(varmap, function(vm, s) harmonise_site(dat_raw[[s]], meta[[s]], vm, target_ids[[s]]))
+
+# Expressions that could not be evaluated (should be empty)
+map(harm, ~ .x$log %>% filter(status != "ok"))
+
+# Data, dictionary and event used for the comparison
+dat_cmp   <- dat_raw
+meta_cmp  <- meta
+event_cmp <- target_event
+for (s in names(harm)) {
+  mapped         <- unique(sub("___.*$", "", names(harm[[s]]$data)))
+  dat_cmp[[s]]   <- harm[[s]]$data
+  meta_cmp[[s]]  <- meta$MLW_HOS %>% filter(field_name %in% mapped)
+  event_cmp[[s]] <- NA
+}
+map_int(meta_cmp, nrow)
+
+# Name check for sites using MLW names as is (saved as that site's matching file)
+ref_dict <- classify_fields(meta$MLW_HOS)
+for (s in setdiff(names(varmap_file)[is.na(varmap_file)], "MLW_HOS")) {
+  name_check <- ref_dict %>%
+    select(ref_field = field_name, ref_form = form_name, ref_label = field_label, ref_choices = choices) %>%
+    left_join(classify_fields(meta[[s]]) %>%
+                select(ref_field = field_name, site_label = field_label, site_choices = choices),
+              by = "ref_field") %>%
+    mutate(match = case_when(
+      is.na(site_label)                                                  ~ "Not available",
+      site_label == ref_label &
+        coalesce(site_choices, "") == coalesce(ref_choices, "")          ~ "Exact (same name)",
+      TRUE                                                               ~ "Same name, definition differs"
+    ))
+  dir.create(varmap_dir, showWarnings = FALSE)
+  write_xlsx(list(varmap = name_check),
+             file.path(varmap_dir, paste0("SAVAC_HOS_varmap_", site_labels[[s]], "_namecheck.xlsx")))
+  print(count(name_check, match))
+}
+```
+
+## 7.4 Analysis rows per site
+
+```{r trig-build}
+# Dictionary and analysis rows per site
+trig_dict <- map(meta_cmp, classify_fields)
+trig_rows <- imap(trig_dict, function(d, s) {
+  get_form_rows(dat_cmp[[s]], d, target_ids[[s]], event_cmp[[s]])
+})
+
+# Site overview
+trig_overview <- tibble(
+  site           = unname(site_labels[names(trig_dict)]),
+  source         = ifelse(is.na(varmap_file[names(trig_dict)]), "own variables", "mapped to MLW (varmap)"),
+  forms          = map_chr(trig_dict, ~ paste(unique(.x$form_name), collapse = ", ")),
+  n_fields       = map_int(trig_dict, nrow),
+  target_records = lengths(target_ids)[names(trig_dict)],
+  form_rows      = map_int(trig_rows, nrow),
+  form_records   = map_int(trig_rows, ~ n_distinct(.x$record_id))
+)
+trig_overview
+
+# Header labels with number of analysis rows per site
+header_n <- setNames(paste0(site_labels, "\n(n=", map_int(trig_rows, nrow)[names(site_labels)], ")"),
+                     site_labels)
+```
+
+## 7.5 Combined data dictionary
+
+One row per variable across all sites. Question, type, choices and branching
+logic come from the first site where the variable appears (MLW > PGI > MRCG);
+differences between sites are flagged in `issues`.
+
+```{r trig-dictionary}
+# Stop early if no variable matches var_prefix
+if (sum(map_int(trig_dict, nrow)) == 0) {
+  stop("No variables match var_prefix = '", var_prefix, "'. ",
+       "Check names with: map(meta, ~ grep(var_prefix, .x$field_name, value = TRUE))")
+}
+
+# All sites' dictionaries stacked (pos = order of first appearance)
+dict_all <- bind_rows(trig_dict, .id = "site_key") %>%
+  mutate(site = unname(site_labels[site_key]),
+         pos  = row_number())
+
+# Master dictionary: one row per variable
+master_dict <- dict_all %>%
+  group_by(field_name) %>%
+  summarise(
+    # Difference flags first (before the columns are collapsed to one value)
+    diff_type       = n_distinct(var_type) > 1,
+    diff_label      = n_distinct(field_label) > 1,
+    diff_choices    = n_distinct(coalesce(choices, "")) > 1,
+    diff_logic      = n_distinct(coalesce(branching_logic, "")) > 1,
+    sites           = paste(site, collapse = ", "),
+    pos             = min(pos),
+    form_name       = first(form_name),
+    var_type        = first(var_type),
+    field_label     = first(field_label),
+    choices         = first(choices),
+    branching_logic = first(branching_logic),
+    .groups = "drop"
+  ) %>%
+  arrange(pos) %>%
+  select(-pos)
+
+# Question label per site (side by side)
+label_by_site <- dict_all %>%
+  select(field_name, site, field_label) %>%
+  pivot_wider(names_from = site, values_from = field_label, names_prefix = "label_")
+
+# Text summary of differences for one variable
+make_issues <- function(sites, diff_type, diff_label, diff_choices, diff_logic) {
+  not_in <- setdiff(site_labels, strsplit(sites, ", ")[[1]])
+  paste(c(
+    if (length(not_in) > 0) paste0("Not in ", paste(not_in, collapse = ", ")),
+    if (diff_type)    "Type differs",
+    if (diff_label)   "Question differs",
+    if (diff_choices) "Choices differ",
+    if (diff_logic)   "Branching logic differs"
+  ), collapse = "; ")
+}
+
+master_dict <- master_dict %>%
+  left_join(label_by_site, by = "field_name")
+master_dict$issues <- pmap_chr(
+  master_dict[c("sites", "diff_type", "diff_label", "diff_choices", "diff_logic")],
+  make_issues
+)
+
+master_dict
+
+# Master choices: union of codes across sites (order: first site, then new codes)
+cate_dict <- dict_all %>% filter(var_type %in% c("Cate", "Check"))
+
+choices_all <- purrr::map_dfr(seq_len(nrow(cate_dict)), function(i) {
+  parse_choices(cate_dict$choices[i]) %>%
+    mutate(field_name = cate_dict$field_name[i],
+           site       = cate_dict$site[i],
+           .before = 1)
+})
+# Keep expected columns even when there are no categorical variables
+if (nrow(choices_all) == 0) {
+  choices_all <- tibble(field_name = character(), site = character(),
+                        code = character(), label = character())
+}
+
+master_choices <- choices_all %>%
+  distinct(field_name, code, .keep_all = TRUE) %>%
+  group_by(field_name) %>%
+  mutate(ord = row_number()) %>%
+  ungroup() %>%
+  select(field_name, code, label, ord)
+
+# Answer label per site (side by side) for checking
+choices_by_site <- master_choices %>%
+  left_join(choices_all %>%
+              select(field_name, code, site, site_label = label) %>%
+              pivot_wider(names_from = site, values_from = site_label, names_prefix = "label_"),
+            by = c("field_name", "code"))
+
+choices_by_site
+
+# Variables with differences between sites
+dict_issues <- master_dict %>%
+  filter(issues != "") %>%
+  select(field_name, field_label, sites, issues)
+dict_issues
+```
+
+## 7.6 Site values by master dictionary
+
+```{r trig-values}
+
+trig_compare <- map(seq_len(nrow(master_dict)), function(i) {
+  fld <- master_dict$field_name[i]
+  mc  <- master_choices %>% filter(field_name == fld) %>% select(code, label, ord)
+
+  # Summary per site (NULL if the field is not in that site's dictionary)
+  res <- imap(trig_dict, function(d, s) {
+    dd <- d %>% filter(field_name == fld)
+    if (nrow(dd) == 0) return(NULL)
+    summarise_var(trig_rows[[s]], dd[1, ], mc)
+  })
+
+  # Detail table
+  long <- imap_dfr(compact(res), ~ .x$tab %>%
+                     mutate(site = site_labels[[.y]], logic_applied = .x$applied))
+  wide <- long %>%
+    group_by(row) %>% mutate(ord = min(ord)) %>% ungroup() %>%
+    select(row, ord, site, value) %>%
+    pivot_wider(names_from = site, values_from = value, values_fill = "-") %>%
+    arrange(ord) %>%
+    select(-ord)
+  for (s in site_labels) if (!s %in% names(wide)) wide[[s]] <- "Not in form"
+  wide <- wide %>% select(row, all_of(unname(site_labels)))
+
+  # Completeness per site
+  comp <- imap_dfr(res, function(r, s) {
+    if (is.null(r)) return(tibble(site = site_labels[[s]], k = NA_integer_, n = NA_integer_,
+                                  pct = NA_real_, cell = "Not in form"))
+    if (is.na(r$k)) return(tibble(site = site_labels[[s]], k = NA_integer_, n = r$n,
+                                  pct = NA_real_, cell = "Not exported"))
+    pct <- if (r$n > 0) r$k / r$n * 100 else NA_real_
+    tibble(site = site_labels[[s]], k = r$k, n = r$n, pct = pct,
+           cell = if (r$n > 0) sprintf("%d/%d (%.0f%%)", r$k, r$n, pct) else "0/0")
+  })
+
+  list(
+    field      = fld,
+    label      = master_dict$field_label[i],
+    type       = master_dict$var_type[i],
+    logic      = master_dict$branching_logic[i],
+    issues     = master_dict$issues[i],
+    logic_fail = unique(long$site[long$logic_applied %in% FALSE]),
+    table      = wide,
+    comp       = comp
+  )
+})
+
+# Completeness overview (one row per variable)
+trig_completeness <- map_dfr(trig_compare, ~ .x$comp %>%
+                               mutate(field = .x$field, label = .x$label, type = .x$type, .before = 1))
+
+completeness_wide <- trig_completeness %>%
+  select(field, label, type, site, cell, pct) %>%
+  pivot_wider(names_from = site, values_from = c(cell, pct))
+
+overview_cells <- completeness_wide %>%
+  select(field, label, type, all_of(paste0("cell_", site_labels))) %>%
+  rename_with(~ sub("^cell_", "", .x))
+overview_pct <- completeness_wide %>%
+  select(all_of(paste0("pct_", site_labels))) %>%
+  rename_with(~ sub("^pct_", "", .x))
+
+overview_cells
+
+# Long table of all detail rows (for checking / Excel)
+trig_compare_long <- map_dfr(trig_compare, ~ .x$table %>%
+                               rename(response = row) %>%
+                               mutate(field = .x$field, question = .x$label, type = .x$type, .before = 1))
+trig_compare_long
+```
+
+# 8. RHD cases - counts, age groups, enrolment dates, ID lists
+
+Cases = RHD target records (section 7.1), one row per record. Uses the
+harmonised data (section 7.3), so all sites have MLW variables:
+enrolment date = `rh_ic_dt`, age = `rh_age_year` (or `rh_age_month` / `rh_age_day`
+if under 1 year). For MRCG these come from `cda_dt_con` and `cda_dob_cal_yrs`
+through the varmap file.
+
+## 8.1 Settings
+
+```{r cases-settings}
+# Age groups (completed years)
+age_breaks <- c(-Inf, 5, 15, 19, Inf)
+age_labels <- c("<5", "5-14", "15-18", "19+")
+```
+
+## 8.2 Build case list
+
+```{r cases-build}
+# One row per case: record_id, enrolment date, age
+build_cases <- function(s) {
+  df <- dat_cmp[[s]] %>% filter(record_id %in% target_ids[[s]])
+  if (!is.na(event_cmp[[s]])) df <- df %>% filter(redcap_event_name == event_cmp[[s]])
+  if ("redcap_repeat_instrument" %in% names(df)) df <- df %>% filter(is.na(redcap_repeat_instrument))
+
+  # Variables missing at a site are added as NA
+  for (v in c("rh_ic_dt", "rh_age_year", "rh_age_month", "rh_age_day")) {
+    if (!v %in% names(df)) {
+      warning(s, ": ", v, " not found")
+      df[[v]] <- NA
+    }
+  }
+
+  df %>%
+    transmute(
+      record_id = as.character(record_id),
+      enrol_dt  = to_date(rh_ic_dt),
+      # Age in years; months / days used only when years is missing (under 1 year)
+      age_years = coalesce(suppressWarnings(as.numeric(rh_age_year)),
+                           suppressWarnings(as.numeric(rh_age_month)) / 12,
+                           suppressWarnings(as.numeric(rh_age_day)) / 365.25)
+    ) %>%
+    # Collapse to one row per record (first non-missing value)
+    group_by(record_id) %>%
+    summarise(enrol_dt  = first_value(enrol_dt),
+              age_years = first_value(age_years),
+              .groups   = "drop") %>%
+    mutate(
+      age_group = cut(floor(age_years), breaks = age_breaks, labels = age_labels, right = FALSE),
+      age_group = factor(coalesce(as.character(age_group), "Missing"),
+                         levels = c(age_labels, "Missing"))
+    )
+}
+
+cases_all <- imap_dfr(site_labels, function(lbl, s) {
+  build_cases(s) %>% mutate(site = lbl, .before = 1)
+}) %>%
+  mutate(site = factor(site, levels = site_labels))
+
+# Duplicate check (should be empty)
+cases_all %>% count(site, record_id) %>% filter(n > 1)
+```
+
+## 8.3 Summary tables
+
+```{r cases-summary}
+safe_min <- function(x) if (all(is.na(x))) as.Date(NA) else min(x, na.rm = TRUE)
+safe_max <- function(x) if (all(is.na(x))) as.Date(NA) else max(x, na.rm = TRUE)
+
+# Total cases and enrolment date range per site
+case_summary <- cases_all %>%
+  group_by(site) %>%
+  summarise(n_cases          = n_distinct(record_id),
+            enrol_first      = safe_min(enrol_dt),
+            enrol_last       = safe_max(enrol_dt),
+            missing_enrol_dt = sum(is.na(enrol_dt)),
+            missing_age      = sum(is.na(age_years)),
+            .groups = "drop") %>%
+  mutate(site = as.character(site))
+
+case_summary <- case_summary %>%
+  bind_rows(tibble(site             = "Total",
+                   n_cases          = sum(case_summary$n_cases),
+                   enrol_first      = safe_min(case_summary$enrol_first),
+                   enrol_last       = safe_max(case_summary$enrol_last),
+                   missing_enrol_dt = sum(case_summary$missing_enrol_dt),
+                   missing_age      = sum(case_summary$missing_age)))
+case_summary
+
+# Cases by age group per site
+case_age <- cases_all %>%
+  count(site, age_group, .drop = FALSE) %>%
+  pivot_wider(names_from = age_group, values_from = n, values_fill = 0) %>%
+  mutate(site = as.character(site), Total = rowSums(across(-site)))
+
+case_age <- case_age %>%
+  bind_rows(case_age %>% summarise(across(where(is.numeric), sum)) %>% mutate(site = "Total"))
+case_age
+
+# ID list per site
+case_ids <- map(site_labels, function(lbl) {
+  cases_all %>%
+    filter(site == lbl) %>%
+    transmute(record_id, enrol_dt, age_years = round(age_years, 1), age_group) %>%
+    arrange(enrol_dt, record_id)
+}) %>%
+  set_names(paste0("ids_", site_labels))
+map_int(case_ids, nrow)
+```
+
+## 8.4 Save to Excel
+
+```{r cases-save}
+out_cases <- paste0("SAVAC_HOS_RHD_cases_", format(Sys.Date(), "%Y%m%d"), ".xlsx")
+write_xlsx(c(list(summary = case_summary, age_group = case_age), case_ids), out_cases)
+out_cases
+```
+
+# 9. Word report
+
+One Word file: RHD case summary first, then the RHD variable comparison (section 7).
+
+## 9.1 Case summary
+
+```{r word-cases}
+doc <- if (file.exists("DocStyle.docx")) read_docx("DocStyle.docx") else read_docx()
+
+fmt_date <- function(x) coalesce(format(x, "%d %b %Y"), "-")
+
+# Summary flextable: bold Total row with a line above it
+make_summary_ft <- function(df, labels = list()) {
+  ft <- flextable(df)
+  if (length(labels) > 0) ft <- set_header_labels(ft, values = labels)
+  tot <- which(df[[1]] == "Total")
+  if (length(tot) > 0) {
+    ft <- bold(ft, i = tot)
+    if (tot > 1) ft <- hline(ft, i = tot - 1, border = fp_border(width = 2))
+  }
+  ft <- align(ft, j = 2:ncol(df), align = "center", part = "all")
+  ft <- fontsize(ft, size = 9, part = "all")
+  autofit(ft)
+}
+
+doc <- body_add_par(doc, "Hospital - RHD cases", style = "heading 1")
+doc <- body_add_par(doc, paste0("Cases: RHD enrolled records. Created ", format(Sys.Date(), "%d %b %Y"), "."))
+
+# Number of cases and enrolment period
+doc <- body_add_par(doc, "Number of cases and enrolment period", style = "heading 2")
+cs <- case_summary %>% mutate(across(c(enrol_first, enrol_last), fmt_date))
+doc <- body_add_flextable(doc, make_summary_ft(cs, list(
+  site = "Site", n_cases = "Cases", enrol_first = "First enrolment", enrol_last = "Last enrolment",
+  missing_enrol_dt = "Missing enrolment date", missing_age = "Missing age")))
+doc <- body_add_par(doc, "Enrolment date = date of obtaining consent / assent (rh_ic_dt).")
+doc <- body_add_par(doc, "")
+
+# Number of cases by age group, n (% of site total)
+doc <- body_add_par(doc, "Number of cases by age group", style = "heading 2")
+ca <- case_age %>%
+  mutate(across(all_of(c(age_labels, "Missing")),
+                ~ sprintf("%d (%.1f%%)", as.integer(.x), ifelse(Total > 0, .x / Total * 100, 0))))
+doc <- body_add_flextable(doc, make_summary_ft(ca, list(site = "Site")))
+doc <- body_add_par(doc, "Age in completed years at enrolment; % of site total.")
+
+# Case ID list per site
+doc <- body_add_break(doc)
+doc <- body_add_par(doc, "Case ID list by site", style = "heading 2")
+for (nm in names(case_ids)) {
+  ids <- case_ids[[nm]] %>% mutate(enrol_dt = fmt_date(enrol_dt))
+  doc <- body_add_par(doc, paste0(sub("^ids_", "", nm), " (N = ", nrow(ids), ")"), style = "heading 3")
+  if (nrow(ids) == 0) {
+    doc <- body_add_par(doc, "No cases.")
+    next
+  }
+  ft <- flextable(ids)
+  ft <- set_header_labels(ft, record_id = "Record ID", enrol_dt = "Enrolment date",
+                          age_years = "Age (years)", age_group = "Age group")
+  ft <- align(ft, j = 2:4, align = "center", part = "all")
+  ft <- fontsize(ft, size = 8, part = "all")
+  ft <- autofit(ft)
+  doc <- body_add_flextable(doc, ft)
+  doc <- body_add_par(doc, "")
+}
+doc <- body_add_break(doc)
+```
+
+## 9.2 RHD variables summary by site
+
+```{r trig-word}
+doc <- body_add_par(doc, "Hospital - RHD variables summary by site", style = "heading 1")
+doc <- body_add_par(doc, paste0("Target records: RHD enrolled records. Created ", format(Sys.Date(), "%d %b %Y"), "."))
+
+# Site overview
+ft_site <- flextable(trig_overview)
+ft_site <- set_header_labels(ft_site, site = "Site", source = "Variables source", forms = "Form(s)",
+                             n_fields = "Variables", target_records = "Target records",
+                             form_rows = "Rows with data", form_records = "Records with data")
+ft_site <- align(ft_site, j = c("n_fields", "target_records", "form_rows", "form_records"),
+                 align = "center", part = "all")
+ft_site <- fontsize(ft_site, size = 9, part = "all")
+ft_site <- autofit(ft_site)
+doc <- body_add_flextable(doc, ft_site)
+doc <- body_add_par(doc, "")
+
+# Dictionary differences between sites
+doc <- body_add_par(doc, "Data dictionary differences", style = "heading 2")
+if (nrow(dict_issues) > 0) {
+  ft_iss <- flextable(dict_issues)
+  ft_iss <- set_header_labels(ft_iss, field_name = "Variable", field_label = "Question",
+                              sites = "Sites", issues = "Differences")
+  ft_iss <- fontsize(ft_iss, size = 8, part = "all")
+  ft_iss <- width(ft_iss, j = "field_name",  width = 1.2)
+  ft_iss <- width(ft_iss, j = "field_label", width = 2.4)
+  ft_iss <- width(ft_iss, j = "sites",       width = 1.0)
+  ft_iss <- width(ft_iss, j = "issues",      width = 2.0)
+  doc <- body_add_flextable(doc, ft_iss)
+} else {
+  doc <- body_add_par(doc, "All selected variables have the same definition across sites.")
+}
+doc <- body_add_par(doc, "")
+
+# Completeness overview
+doc <- body_add_par(doc, "Completeness overview", style = "heading 2")
+doc <- body_add_par(doc, paste0("Answered / denominator (after branching logic). Red: below ",
+                                low_threshold, "%. Grey: not in form or not exported."))
+
+ft_comp <- flextable(overview_cells)
+ft_comp <- set_header_labels(ft_comp, field = "Variable", label = "Question", type = "Type")
+for (s in site_labels) {
+  low <- which(!is.na(overview_pct[[s]]) & overview_pct[[s]] < low_threshold)
+  na  <- which(overview_cells[[s]] %in% c("Not in form", "Not exported"))
+  if (length(low) > 0) ft_comp <- bg(ft_comp, i = low, j = s, bg = "#F8D7DA")
+  if (length(na)  > 0) ft_comp <- bg(ft_comp, i = na,  j = s, bg = "#E7E6E6")
+}
+ft_comp <- align(ft_comp, j = c("type", site_labels), align = "center", part = "all")
+ft_comp <- fontsize(ft_comp, size = 8, part = "all")
+ft_comp <- width(ft_comp, j = "field", width = 1.2)
+ft_comp <- width(ft_comp, j = "label", width = 2.4)
+ft_comp <- width(ft_comp, j = "type",  width = 0.5)
+ft_comp <- width(ft_comp, j = site_labels, width = 1.0)
+doc <- body_add_flextable(doc, ft_comp)
+doc <- body_add_break(doc)
+
+# Detail tables
+doc <- body_add_par(doc, "Detail by variable", style = "heading 2")
+for (item in trig_compare) {
+  doc <- body_add_par(doc, item$label, style = "heading 3")
+
+  info <- paste0("Variable: ", item$field, " | Type: ", item$type)
+  if (!is.na(item$logic) && item$logic != "") info <- paste0(info, " | Branching logic: ", gsub("\n", " ", item$logic))
+  doc <- body_add_par(doc, info)
+  if (item$issues != "") doc <- body_add_par(doc, paste0("* Dictionary differences: ", item$issues))
+  if (length(item$logic_fail) > 0) {
+    doc <- body_add_par(doc, paste0("* Branching logic not applied (all rows used): ",
+                                    paste(item$logic_fail, collapse = ", ")))
+  }
+
+  doc <- body_add_flextable(doc, make_compare_ft(item$table, header_n, item$label))
+  doc <- body_add_par(doc, "")
+}
+
+out_docx <- paste0("SAVAC_HOS_RHD_report_", format(Sys.Date(), "%Y%m%d"), ".docx")
+print(doc, target = out_docx)
+out_docx
+```
+
+# 10. Save (optional)
+
+```{r save, eval=FALSE}
+writexl::write_xlsx(
+  list(rhd_summary   = rhd_summary,
+       rhd_responses = resp_counts,
+       rhd_sites      = trig_overview,
+       rhd_dictionary = master_dict,
+       rhd_choices    = choices_by_site,
+       rhd_overview   = overview_cells,
+       rhd_detail     = trig_compare_long),
+  paste0("SAVAC_hos_summary_", Sys.Date(), ".xlsx")
+)
+```
+===== END FILE =====
+
+===== FILE: SAVAC_community.Rmd =====
+---
+title: "SAVAC - Community Trigger"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# 1. Setup
+
+```{r libraries}
+# install.packages(c("REDCapR", "dplyr", "tidyr", "purrr", "lubridate", "writexl"))
+library(REDCapR)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(lubridate)
+```
+
+# 2. Load data from REDCap
+
+```{r tokens}
+readRenviron("C:/Users/saehyeun.song/Documents/.Renviron")
+
+uri <- "https://ivirdc.ivi.int/api/"
+
+token_names <- c(
+  MLW_COMM  = "SAVAC_MLW_COMM_TOKEN_IVI",
+  PGI_COMM  = "SAVAC_PGI_COMM_TOKEN_PID180",
+  MRCG_COMM = "SAVAC_MRCG_COMM_TOKEN_IVI"
+)
+
+tokens <- Sys.getenv(token_names)
+names(tokens) <- names(token_names)
+
+# Stop if any token is missing
+missing <- names(tokens)[tokens == ""]
+if (length(missing) > 0) {
+  stop("Missing tokens in .Renviron: ", paste(token_names[missing], collapse = ", "))
+}
+```
+
+```{r load-functions}
+# Read records from one project ("raw" or "label")
+read_redcap <- function(token, site, raw_or_label = "raw") {
+  message("> ", site, " [", raw_or_label, "] loading...")
+  res <- REDCapR::redcap_read(
+    redcap_uri   = uri,
+    token        = token,
+    raw_or_label = raw_or_label,
+    batch_size   = 500,
+    verbose      = FALSE
+  )
+  if (!res$success) {
+    warning(site, " [", raw_or_label, "] failed: ", res$outcome_message)
+    return(NULL)
+  }
+  message("  OK: ", nrow(res$data), " rows / ", ncol(res$data), " cols")
+  res$data
+}
+
+# Read data dictionary from one project
+read_metadata <- function(token, site) {
+  message("> ", site, " [metadata] loading...")
+  res <- REDCapR::redcap_metadata_read(redcap_uri = uri, token = token, verbose = FALSE)
+  if (!res$success) {
+    warning(site, " [metadata] failed: ", res$outcome_message)
+    return(NULL)
+  }
+  res$data
+}
+```
+
+```{r load-data}
+dat_raw   <- imap(tokens, read_redcap, raw_or_label = "raw")    # coded values
+dat_label <- imap(tokens, read_redcap, raw_or_label = "label")  # choice labels
+meta      <- imap(tokens, read_metadata)                         # data dictionaries
+
+mlw_comm_raw  <- dat_raw$MLW_COMM
+pgi_comm_raw  <- dat_raw$PGI_COMM
+mrcg_comm_raw <- dat_raw$MRCG_COMM
+
+mlw_comm_lab  <- dat_label$MLW_COMM
+pgi_comm_lab  <- dat_label$PGI_COMM
+mrcg_comm_lab <- dat_label$MRCG_COMM
+
+mlw_comm_meta  <- meta$MLW_COMM
+pgi_comm_meta  <- meta$PGI_COMM
+mrcg_comm_meta <- meta$MRCG_COMM
+```
+
+# 3. Check event names
+
+```{r events}
+table(mlw_comm_raw$redcap_event_name)
+table(pgi_comm_raw$redcap_event_name)
+table(mrcg_comm_raw$redcap_event_name)
+```
+
+# 4. Functions
+
+```{r functions}
+# Build trigger dataset with baseline (bs_) variables and age
+# baseline_event / trigger_event: event names differ by site
+make_comm_trigger <- function(df,
+                              baseline_event = "baseline_arm_1",
+                              trigger_event  = "trigger_arm_1") {
+
+  # Baseline: non-repeating row only (one row per record), bs_ variables only
+  bs <- df %>%
+    filter(redcap_event_name == baseline_event,
+           is.na(redcap_repeat_instrument)) %>%
+    select(record_id, starts_with("bs_"))
+
+  # Add age-related variables missing in some sites (filled with NA)
+  for (v in c("bs_dob", "bs_ic_dt", "bs_age_year", "bs_age_month", "bs_age_calc")) {
+    if (!v %in% names(bs)) bs[[v]] <- NA
+  }
+
+  # DOB usable: if bs_dob_known exists (MRCG), only when bs_dob_known == 1
+  bs$dob_ok <- if ("bs_dob_known" %in% names(bs)) bs$bs_dob_known %in% 1 else TRUE
+
+  bs <- bs %>%
+    mutate(
+      # as.character() first so all-NA logical columns convert safely
+      bs_dob   = as.Date(as.character(bs_dob)),
+      bs_ic_dt = as.Date(as.character(bs_ic_dt)),
+
+      # Age at informed consent from DOB
+      age_dob = if_else(dob_ok,
+                        time_length(interval(bs_dob, bs_ic_dt), "year"),
+                        NA_real_),
+
+      # REDCap-calculated age
+      age_calc = as.numeric(bs_age_calc),
+
+      # Reported age (years + months)
+      age_reported = if_else(
+        is.na(bs_age_year),
+        NA_real_,
+        as.numeric(bs_age_year) + coalesce(as.numeric(bs_age_month), 0) / 12
+      ),
+
+      # Final age: DOB first, then REDCap-calculated age, then reported
+      age_exact  = coalesce(age_dob, age_calc, age_reported),
+      age_years  = round(age_exact, 1),
+      age_source = case_when(
+        !is.na(age_dob)      ~ "dob",
+        !is.na(age_calc)     ~ "calc",
+        !is.na(age_reported) ~ "reported",
+        TRUE                 ~ NA_character_
+      )
+    ) %>%
+    select(-dob_ok)
+
+  # Trigger: drop empty bs_ columns, then attach baseline info
+  df %>%
+    filter(redcap_event_name == trigger_event) %>%
+    select(-starts_with("bs_")) %>%
+    select(where(~ !all(is.na(.x)))) %>%          # drop columns empty in trigger rows
+    mutate(record_id = as.character(record_id)) %>%
+    left_join(bs %>% mutate(record_id = as.character(record_id)),
+              by = "record_id", relationship = "many-to-one")
+}
+
+# Age group: completed years (floor) from unrounded age, so 18.9 stays in 15-18
+add_age_group <- function(df) {
+  df %>%
+    mutate(
+      age_int   = floor(age_exact),
+      age_group = case_when(
+        age_int <  5                 ~ "<5",
+        age_int >= 5  & age_int < 15 ~ "5-14",
+        age_int >= 15 & age_int < 19 ~ "15-18",
+        age_int >= 19                ~ "19+",
+        TRUE                         ~ "Missing"
+      ),
+      age_group = factor(age_group, levels = c("<5", "5-14", "15-18", "19+", "Missing"))
+    )
+}
+
+# Age group counts for one site (unique records, n + %)
+age_table <- function(df) {
+  df %>%
+    distinct(record_id, age_group) %>%
+    count(age_group, .drop = FALSE) %>%
+    mutate(pct = round(n / sum(n) * 100, 1)) %>%
+    bind_rows(tibble(age_group = "Total", n = sum(.$n), pct = 100))
+}
+```
+
+# 5. Build trigger datasets
+
+```{r build}
+mlw_comm_trig  <- make_comm_trigger(mlw_comm_raw) %>%
+  add_age_group()
+
+pgi_comm_trig  <- make_comm_trigger(pgi_comm_raw) %>%
+  add_age_group()
+
+mrcg_comm_trig <- make_comm_trigger(mrcg_comm_raw,
+                                    baseline_event = "baseline_q0_arm_1") %>%
+  add_age_group()
+```
+
+# 6. Checks
+
+```{r checks-records}
+# Trigger rows / unique records
+nrow(mlw_comm_trig);  n_distinct(mlw_comm_trig$record_id)
+nrow(pgi_comm_trig);  n_distinct(pgi_comm_trig$record_id)
+nrow(mrcg_comm_trig); n_distinct(mrcg_comm_trig$record_id)
+
+# Duplicated record_id in trigger datasets (if any)
+mlw_comm_trig  %>% count(record_id) %>% filter(n > 1)
+pgi_comm_trig  %>% count(record_id) %>% filter(n > 1)
+mrcg_comm_trig %>% count(record_id) %>% filter(n > 1)
+```
+
+```{r checks-age}
+# Age source (dob / calc / reported / NA = no age info)
+table(mlw_comm_trig$age_source,  useNA = "ifany")
+table(pgi_comm_trig$age_source,  useNA = "ifany")
+table(mrcg_comm_trig$age_source, useNA = "ifany")
+
+# Age distribution
+summary(mlw_comm_trig$age_exact)
+summary(pgi_comm_trig$age_exact)
+summary(mrcg_comm_trig$age_exact)
+
+# Implausible age (negative or > 100)
+mlw_comm_trig  %>% filter(age_exact < 0 | age_exact > 100) %>% distinct(record_id, bs_dob, bs_ic_dt, age_years)
+pgi_comm_trig  %>% filter(age_exact < 0 | age_exact > 100) %>% distinct(record_id, bs_dob, bs_ic_dt, age_years)
+mrcg_comm_trig %>% filter(age_exact < 0 | age_exact > 100) %>% distinct(record_id, bs_dob, bs_ic_dt, age_years)
+
+# MLW: DOB-based age vs REDCap-calculated age (should be ~0)
+summary(mlw_comm_trig$age_dob - mlw_comm_trig$age_calc)
+```
+
+```{r checks-mrcg}
+# MRCG: which age variables actually have values (by event)
+mrcg_comm_raw %>%
+  group_by(redcap_event_name) %>%
+  summarise(across(any_of(c("bs_dob_known", "bs_dob", "bs_ic_dt", "bs_age_calc")),
+                   ~ sum(!is.na(.x))))
+
+# MRCG: trigger records with age info
+mrcg_comm_trig %>%
+  distinct(record_id, bs_dob_known, bs_dob, bs_ic_dt, bs_age_calc, age_years, age_source)
+```
+
+# 7. Age group summary
+
+## 7.1 Per site
+
+```{r age-per-site}
+age_table(mlw_comm_trig)
+age_table(pgi_comm_trig)
+age_table(mrcg_comm_trig)
+```
+
+## 7.2 Combined (site x age group)
+
+```{r age-combined}
+# Keep only needed columns before combining
+age_summary <- bind_rows(
+  MLW  = mlw_comm_trig  %>% select(record_id, age_group),
+  PGI  = pgi_comm_trig  %>% select(record_id, age_group),
+  MRCG = mrcg_comm_trig %>% select(record_id, age_group),
+  .id  = "site"
+) %>%
+  distinct(site, record_id, age_group) %>%
+  count(site, age_group, .drop = FALSE) %>%
+  pivot_wider(names_from = age_group, values_from = n, values_fill = 0) %>%
+  mutate(Total = rowSums(across(-site)))
+
+age_summary <- age_summary %>%
+  bind_rows(
+    age_summary %>%
+      summarise(across(where(is.numeric), sum)) %>%
+      mutate(site = "Total")
+  ) %>%
+  mutate(site = factor(site, levels = c("MLW", "PGI", "MRCG", "Total"))) %>%
+  arrange(site)
+
+age_summary
+
+# n (%) version
+age_summary_pct <- age_summary %>%
+  mutate(across(c(`<5`, `5-14`, `15-18`, `19+`, Missing),
+                ~ paste0(.x, " (", round(.x / Total * 100, 1), "%)")))
+
+age_summary_pct
+```
+
+# 8. Save (optional)
+
+```{r save, eval=FALSE}
+writexl::write_xlsx(
+  list(age_n = age_summary, age_pct = age_summary_pct),
+  paste0("SAVAC_comm_age_summary_", Sys.Date(), ".xlsx")
+)
+```
+===== END FILE =====
+
+===== FILE: varmap/SAVAC_HOS_varmap_MRCG.csv =====
+ref_field,ref_form,ref_label,ref_type,ref_choices,match,site_expr,row_filter,site_fields,site_form,site_label,site_choices,note,confirmed
+rh_adm_dt,rhd,101. Date of admission,text/date_dmy,,Exact,to_date(cda_dt_ad),,cda_dt_ad,consent_demography_anthropometry,101. Date of admission,,,
+rh_disch_dt,rhd,102. Date of discharge,text/date_dmy,,Approximate,"replace(to_date(adm_dod_dd), adm_out_dis %in% 5, NA)",,"adm_dod_dd, adm_out_dis",admission_treatment_and_hospital_outcome_crf,111 Date of discharge (date of death if died),,"MRCG 111 is ""date of discharge (date of death if died)""; set to NA when outcome = death",
+rh_disch_dt_na,rhd,102. Date of discharge - NA,checkbox,"1, NA, patient hospitalized",Not available,,,,,,,"MRCG has no ""patient still hospitalized"" flag",
+rh_ic,rhd,103. Has informed consent and informed assent (for participants 13-18 years old) been obtained?,radio,"1, Yes | 2, No | 3, NA, enrolled under a waiver of consent",Derived,"ifelse(cda_con_obt %in% 1 | cda_par_con %in% 1, 1, ifelse(cda_con_obt %in% 0 & cda_par_con %in% 0, 2, NA))",,"cda_con_obt, cda_par_con",consent_demography_anthropometry,103. Has written participant informed consent been obtained?,"1, Yes | 0, No",Yes if participant or parental consent obtained; MRCG has no waiver option (code 3),
+rh_no_ic,rhd,104. Reason consent / assent not obtained:,radio,"1, Participant declined | 2, Parent / guardian declined | 98, Other, specify",Not available,,,,,,,,
+rh_no_ic_1,rhd,104. Reason consent / assent not obtained:,radio,"3, Care team declined approaching patient, patient enrolled under a waiver of consent | 98, Other, specify",Not available,,,,,,,,
+rh_no_ic_x,rhd,"104. Reason consent / assent not obtained - Other, specify",text,,Not available,,,,,,,,
+rh_ic_dt,rhd,105. Date of obtaining consent / assent:,text/date_dmy,,Exact,to_date(cda_dt_con),,cda_dt_con,consent_demography_anthropometry,106. Date of consent,,Enrolment (consent) date,
+rh_ic_dt_na,rhd,105. Date of obtaining consent / assent-NA,radio,"1, NA, declined consent, DO NOT CONTINUE",Not available,,,,,,,,
+rh_ic_dt_na_1,rhd,105. Date of obtaining consent / assent-NA,radio,"2, NA, patient under waiver of consent, GO to 203",Not available,,,,,,,,
+rh_enrolsite,rhd,106. Enrolment site:,text,,Recode,"lab(""cda_enr_sit"", cda_enr_sit)",,cda_enr_sit,consent_demography_anthropometry,108. Enrolment site,"1, EFSTH | 2, Kanifing | 3, MRC CSD | 4, Other",MLW free text; MRCG radio label used,
+rh_surv,rhd,107. Was the patient identified through the ARF surveillance?,radio,"1, Yes | 2, No, GO to 201",Not available,,,,,,,,
+rh_diag_arf,rhd,107.1. RHD diagnosis from ARF surveillance,radio,"1, Definite RHD | 2, Probable RHD",Not available,,,,,,,,
+rh_town,rhd,201. Town / neighborhood / settlement area:,text,,Approximate,"lab(""cda_loc_area"", cda_loc_area)",,cda_loc_area,consent_demography_anthropometry,"201. Patient Local government Area, District, Ward & Settlement Area.","1, Banjul | 2, Basse | 3, Brikama | 4, Janjanbureh | 5, Kanifing | 6, Kerewan | 7, Kuntaur | 8, Mansakonko",MRCG Local Government Area label (MLW: town / settlement free text),
+rh_eth,rhd,202. Optional variable: Ethnicity,text,,Recode,"lab(""cda_ethcy"", cda_ethcy)",,cda_ethcy,consent_demography_anthropometry,203. Ethnicity,"1, Mandinka | 2, Wolof | 3, Fula | 4, Jola | 5, Serahule | 6, Serer | 7, Aku | 8, Other",MLW free text; MRCG radio label used,
+rh_gender,rhd,203. Gender:,radio,"1, Male | 2, Female",Exact,cda_sex,,cda_sex,consent_demography_anthropometry,204. Sex,"1, Male | 2, Female","Same codes (1 Male, 2 Female)",
+rh_age_year,rhd,204. Age in years,text/number,,Derived,as.numeric(cda_dob_cal_yrs),,cda_dob_cal_yrs,consent_demography_anthropometry,102.1 Calculated age in years,"CALC: rounddown(datediff([cda_dob_2],[cda_dt_ad],'y','dmy',true),0)",MRCG calculated age in years (DOB to admission date),
+rh_age_month,rhd,"204.1. If less than 1 year, age in months:",text/number,,Derived,"ifelse(as.numeric(cda_dob_cal_yrs) %in% 0, floor(time_length(interval(to_date(cda_dob_2), to_date(cda_dt_ad)), ""month"")), NA)",,"cda_dob_cal_yrs, cda_dob_2, cda_dt_ad",consent_demography_anthropometry,102.1 Calculated age in years,"CALC: rounddown(datediff([cda_dob_2],[cda_dt_ad],'y','dmy',true),0)","Only for age < 1 year, from DOB",
+rh_age_day,rhd,"204.2. If less than 1 month, age in days:",text/number,,Not available,,,,,,,,
+rh_height,rhd,205. Height (cm):,text/integer,,Exact,as.numeric(cda_hgt),,cda_hgt,consent_demography_anthropometry,223.1 Height (cm),,cm,
+rh_height_na___1,rhd,"205. Height (cm) - Not assessed - 1, Not assessed",checkbox,"1, Not assessed",Recode,chk(cda_hgt_kno %in% 0),,cda_hgt_kno,consent_demography_anthropometry,223. Is the Height taken/measured?,"1, Yes | 0, No",Not assessed = height not measured,
+rh_weight,rhd,206. Weight (kg):,text/integer,,Exact,as.numeric(cda_wght),,cda_wght,consent_demography_anthropometry,224.1 Weight (kg),,kg,
+rh_weight_na___1,rhd,"206. Weight (kg) - Not assessed - 1, Not assessed",checkbox,"1, Not assessed",Recode,chk(cda_wght_kn %in% 0),,cda_wght_kn,consent_demography_anthropometry,224. Is the Weight taken/measured?,"1, Yes | 0, No",Not assessed = weight not measured,
+rh_muac,rhd,207. Mid-upper-arm circumference (MUAC) (mm) for ≤5 years,text/number,,Recode,as.numeric(cda_muac) * 10,,cda_muac,consent_demography_anthropometry,225.1 Mid-upper-arm circumference (MUAC) (cm) (for ≤ 5 years old),,"UNIT: MLW mm, MRCG cm -> converted x10",
+rh_muac_na___1,rhd,"207. Mid-upper-arm circumference (MUAC) (mm) for ≤5 years - Not assessed - 1, Not assessed",checkbox,"1, Not assessed",Recode,chk(cda_muac_kn %in% 0),,cda_muac_kn,consent_demography_anthropometry,225. Is the MUAC taken/measured?,"1, Yes | 0, No",Not assessed = MUAC not measured,
+rh_arfhist,rhd,301. Does the patient have a previous history of ARF?,radio,"1, Yes (via previous medical record) | 2, Yes (via ARF surveillance) | 3, Yes (self-report) | 4, No, GO to 401 | 99, Don't know, GO to 401",Partial,,,,,,,MRCG phr_arf is Yes/No only; MLW splits Yes by source (1-3). Decide how to compare before filling site_expr,
+rh_arfhist_x,rhd,"301.1. If yes, specify:",radio,"1, Definite ARF | 2, Probable ARF | 3, Cannot verify (self-report)",Approximate,phr_yes,,phr_yes,prior_history_and_risk_factors_crf,"108.1 If yes,","1, Definite ARF | 2, Probable ARF | 3, Not known","Codes 1-2 same; MRCG 3 ""Not known"" vs MLW 3 ""Cannot verify (self-report)""",
+rh_arfhist_no,rhd,301.2. How many ARF episodes has the patient had?,text/integer,,Exact,suppressWarnings(as.numeric(phr_number)),,phr_number,prior_history_and_risk_factors_crf,number,,,
+rh_arfhist_no_dk___99,rhd,"301.2. How many ARF episodes has the patient had? - Don't know - 99, Don't know",checkbox,"99, Don't know",Recode,chk(phr_num_epi %in% 2),,phr_num_epi,prior_history_and_risk_factors_crf,Number of past episodes,"1, episodes | 2, Not known","Number of episodes ""Not known""",
+rh_arfhist_dt,rhd,301.3. Date of last ARF episode:,text/date_dmy,,Approximate,to_date(phr_sta_date),,phr_sta_date,prior_history_and_risk_factors_crf,108.3 Start date of last episode,,MRCG: start date of last ARF episode,
+rh_arfhist_dt_dk___99,rhd,"301.3. Date of last ARF episode - Don't know - 99, Don't know",checkbox,"99, Don't know",Exact,chk(phr_sta_date_unk___99 %in% 1),,phr_sta_date_unk___99,prior_history_and_risk_factors_crf,Start date of last episode Unknown,"99, Unknown",,
+rh_smpt,rhd,401. What is the patient's presenting complaint / reason for admission? (check any that apply),checkbox,"1, Shortness of breath | 2, Chest pain | 3, Swelling | 4, New murmur | 5, Infective endocarditis | 6, Cardiac failure | 7, Cardiac failure in pregnancy | 8, Atrial fibrillation | 9, Stroke | 10, Other, specify",Exact,rhd_ppc_adm,,rhd_ppc_adm,rhd_case_report_form,101 What is the patient's presenting complaint / reason for admission?,"1, Shortness of breath | 2, Chest pain | 3, Swelling | 4, New murmur | 5, Infective endocarditis | 6, Cardiac failure | 7, Cardiac failure in pregnancy | 8, Atrial fibrillation | 9, Stroke | 10, Other",Checkbox: same codes 1-10 (columns copied),
+rh_smpt_x,rhd,"401. What is the patient's presenting complaint / reason for admission? - Other, specify:",text,,Exact,rhd_spy1,,rhd_spy1,rhd_case_report_form,specify,,,
+rh_eval___1,rhd,"402.Valves / lesions of RHD: - 1, MR",checkbox,"1, MR | 2, MS | 3, MR/MS | 4, AR | 5, AS | 6, AR/AS | 7, TR | 98, Other",Recode,chk(cin_eco_rts %in% 1),,cin_eco_rts,clinical_investigations_crf,102.2 Result,"1, MR [mild/moderate/severe] | 2, MS [mild/moderate/severe] | 3, MR / MS [mild/moderate/severe] | 4, AR [mild/moderate/severe] | 5, AS [mild/moderate/severe] | 6, AR /AS [mild/moderate/severe] | 7, TR [mild/moderate/severe] | 8, Other",MRCG echo result is a single choice (radio); MLW allows multiple,
+rh_eval___2,rhd,"402.Valves / lesions of RHD: - 2, MS",checkbox,"1, MR | 2, MS | 3, MR/MS | 4, AR | 5, AS | 6, AR/AS | 7, TR | 98, Other",Recode,chk(cin_eco_rts %in% 2),,cin_eco_rts,clinical_investigations_crf,102.2 Result,"1, MR [mild/moderate/severe] | 2, MS [mild/moderate/severe] | 3, MR / MS [mild/moderate/severe] | 4, AR [mild/moderate/severe] | 5, AS [mild/moderate/severe] | 6, AR /AS [mild/moderate/severe] | 7, TR [mild/moderate/severe] | 8, Other",,
+rh_eval___3,rhd,"402.Valves / lesions of RHD: - 3, MR/MS",checkbox,"1, MR | 2, MS | 3, MR/MS | 4, AR | 5, AS | 6, AR/AS | 7, TR | 98, Other",Recode,chk(cin_eco_rts %in% 3),,cin_eco_rts,clinical_investigations_crf,102.2 Result,"1, MR [mild/moderate/severe] | 2, MS [mild/moderate/severe] | 3, MR / MS [mild/moderate/severe] | 4, AR [mild/moderate/severe] | 5, AS [mild/moderate/severe] | 6, AR /AS [mild/moderate/severe] | 7, TR [mild/moderate/severe] | 8, Other",,
+rh_eval___4,rhd,"402.Valves / lesions of RHD: - 4, AR",checkbox,"1, MR | 2, MS | 3, MR/MS | 4, AR | 5, AS | 6, AR/AS | 7, TR | 98, Other",Recode,chk(cin_eco_rts %in% 4),,cin_eco_rts,clinical_investigations_crf,102.2 Result,"1, MR [mild/moderate/severe] | 2, MS [mild/moderate/severe] | 3, MR / MS [mild/moderate/severe] | 4, AR [mild/moderate/severe] | 5, AS [mild/moderate/severe] | 6, AR /AS [mild/moderate/severe] | 7, TR [mild/moderate/severe] | 8, Other",,
+rh_eval___5,rhd,"402.Valves / lesions of RHD: - 5, AS",checkbox,"1, MR | 2, MS | 3, MR/MS | 4, AR | 5, AS | 6, AR/AS | 7, TR | 98, Other",Recode,chk(cin_eco_rts %in% 5),,cin_eco_rts,clinical_investigations_crf,102.2 Result,"1, MR [mild/moderate/severe] | 2, MS [mild/moderate/severe] | 3, MR / MS [mild/moderate/severe] | 4, AR [mild/moderate/severe] | 5, AS [mild/moderate/severe] | 6, AR /AS [mild/moderate/severe] | 7, TR [mild/moderate/severe] | 8, Other",,
+rh_eval___6,rhd,"402.Valves / lesions of RHD: - 6, AR/AS",checkbox,"1, MR | 2, MS | 3, MR/MS | 4, AR | 5, AS | 6, AR/AS | 7, TR | 98, Other",Recode,chk(cin_eco_rts %in% 6),,cin_eco_rts,clinical_investigations_crf,102.2 Result,"1, MR [mild/moderate/severe] | 2, MS [mild/moderate/severe] | 3, MR / MS [mild/moderate/severe] | 4, AR [mild/moderate/severe] | 5, AS [mild/moderate/severe] | 6, AR /AS [mild/moderate/severe] | 7, TR [mild/moderate/severe] | 8, Other",,
+rh_eval___7,rhd,"402.Valves / lesions of RHD: - 7, TR",checkbox,"1, MR | 2, MS | 3, MR/MS | 4, AR | 5, AS | 6, AR/AS | 7, TR | 98, Other",Recode,chk(cin_eco_rts %in% 7),,cin_eco_rts,clinical_investigations_crf,102.2 Result,"1, MR [mild/moderate/severe] | 2, MS [mild/moderate/severe] | 3, MR / MS [mild/moderate/severe] | 4, AR [mild/moderate/severe] | 5, AS [mild/moderate/severe] | 6, AR /AS [mild/moderate/severe] | 7, TR [mild/moderate/severe] | 8, Other",,
+rh_eval___98,rhd,"402.Valves / lesions of RHD: - 98, Other",checkbox,"1, MR | 2, MS | 3, MR/MS | 4, AR | 5, AS | 6, AR/AS | 7, TR | 98, Other",Recode,chk(cin_eco_rts %in% 8),,cin_eco_rts,clinical_investigations_crf,102.2 Result,"1, MR [mild/moderate/severe] | 2, MS [mild/moderate/severe] | 3, MR / MS [mild/moderate/severe] | 4, AR [mild/moderate/severe] | 5, AS [mild/moderate/severe] | 6, AR /AS [mild/moderate/severe] | 7, TR [mild/moderate/severe] | 8, Other",MRCG 8 Other -> MLW 98 Other,
+rh_eval_mr,rhd,402. MR,radio,"1, Mild | 2, Moderate | 3, Severe",Not available,,,,,,,MRCG has no separate severity variables,
+rh_eval_ms,rhd,402. MS,radio,"1, Mild | 2, Moderate | 3, Severe",Not available,,,,,,,,
+rh_eval_mrms,rhd,402. MR/MS,radio,"1, Mild | 2, Moderate | 3, Severe",Not available,,,,,,,,
+rh_eval_ar,rhd,402. AR,radio,"1, Mild | 2, Moderate | 3, Severe",Not available,,,,,,,,
+rh_eval_as,rhd,402. AS,radio,"1, Mild | 2, Moderate | 3, Severe",Not available,,,,,,,,
+rh_eval_aras,rhd,402. AR/AS,radio,"1, Mild | 2, Moderate | 3, Severe",Not available,,,,,,,,
+rh_eval_tr,rhd,402. TR,radio,"1, Mild | 2, Moderate | 3, Severe",Not available,,,,,,,,
+rh_eval_x,rhd,"402. Valves / lesions of RHD - Other, specify",text,,Exact,cin_oth_spy,,cin_oth_spy,clinical_investigations_crf,other specify,,,
+rh_eval_oth,rhd,402. Other([rh_eval_x]),radio,"1, Mild | 2, Moderate | 3, Severe",Not available,,,,,,,,
+rh_echocard_dt,rhd,403. Date of patient's last echocardiogram:,text/date_dmy,,Approximate,to_date(cin_con_dt2),,cin_con_dt2,clinical_investigations_crf,102 Conducted Date,,MRCG: echo conducted date (this admission); MLW: date of last echo,
+rh_echocard_dt_dk,rhd,403. Date of patient's last echocardiogram - Don't know,checkbox,"99, Don't know",Not available,,,,,,,,
+rh_dgn_noarf,rhd,501. Clinical RHD with no history of ARF Echocardiographic evidence of RHD in a symptomatic person + NO history of ARF,radio,"1, Yes | 2, No",Derived,"ifelse(is.na(rhd_dcy_rhd), NA, ifelse(rhd_dcy_rhd %in% 1, 1, 2))",,rhd_dcy_rhd,rhd_case_report_form,Diagnostic Category for RHD,"1, Clinical RHD with no history of ARF, Echocardiographic evidence of RHD in a symptomatic person + NO history of ARF | 2, Clinical RHD with history of ARF, Echocardiographic evidence of RHD in a symptomatic person + history of ARF | 3, Suspected RHD with history of ARF, Pathological murmur + history of ARF + NO echocardiography available | 4, Latent RHD, Echocardiographic evidence of RHD discovered during echocardiographic screening | 5, Not RHD",From MRCG diagnostic category = 1,
+rh_dgn_hisarf,rhd,502. Clinical RHD with history of ARF Echocardiographic evidence of RHD in a symptomatic person + history of ARF,radio,"1, Yes | 2, No",Derived,"ifelse(is.na(rhd_dcy_rhd), NA, ifelse(rhd_dcy_rhd %in% 2, 1, 2))",,rhd_dcy_rhd,rhd_case_report_form,Diagnostic Category for RHD,"1, Clinical RHD with no history of ARF, Echocardiographic evidence of RHD in a symptomatic person + NO history of ARF | 2, Clinical RHD with history of ARF, Echocardiographic evidence of RHD in a symptomatic person + history of ARF | 3, Suspected RHD with history of ARF, Pathological murmur + history of ARF + NO echocardiography available | 4, Latent RHD, Echocardiographic evidence of RHD discovered during echocardiographic screening | 5, Not RHD",From MRCG diagnostic category = 2,
+rh_dgn_sushisarf,rhd,503. Suspected RHD with history of ARF Pathological murmur + history of ARF + NO echocardiography available,radio,"1, Yes | 2, No",Derived,"ifelse(is.na(rhd_dcy_rhd), NA, ifelse(rhd_dcy_rhd %in% 3, 1, 2))",,rhd_dcy_rhd,rhd_case_report_form,Diagnostic Category for RHD,"1, Clinical RHD with no history of ARF, Echocardiographic evidence of RHD in a symptomatic person + NO history of ARF | 2, Clinical RHD with history of ARF, Echocardiographic evidence of RHD in a symptomatic person + history of ARF | 3, Suspected RHD with history of ARF, Pathological murmur + history of ARF + NO echocardiography available | 4, Latent RHD, Echocardiographic evidence of RHD discovered during echocardiographic screening | 5, Not RHD",From MRCG diagnostic category = 3,
+rh_dgn_latent,rhd,504. Latent RHD Echocardiographic evidence of RHD discovered during echocardiographic screening,radio,"1, Yes | 2, No",Derived,"ifelse(is.na(rhd_dcy_rhd), NA, ifelse(rhd_dcy_rhd %in% 4, 1, 2))",,rhd_dcy_rhd,rhd_case_report_form,Diagnostic Category for RHD,"1, Clinical RHD with no history of ARF, Echocardiographic evidence of RHD in a symptomatic person + NO history of ARF | 2, Clinical RHD with history of ARF, Echocardiographic evidence of RHD in a symptomatic person + history of ARF | 3, Suspected RHD with history of ARF, Pathological murmur + history of ARF + NO echocardiography available | 4, Latent RHD, Echocardiographic evidence of RHD discovered during echocardiographic screening | 5, Not RHD",From MRCG diagnostic category = 4,
+rh_med___1,rhd,"601. Medications - 1, Benzathine penicillin G",checkbox,"1, Benzathine penicillin G | 2, Oral penicillin V | 3, Erythromycin | 4, Warfarin | 5, Other cardiac medicines",Approximate,chk(adm_phylaxis___2 %in% 1),,adm_phylaxis___2,admission_treatment_and_hospital_outcome_crf,103. Antibiotic prophylaxis,"1, Oral penicillin | 2, Intramuscular penicillin | 3, Other",Benzathine penicillin G ~ MRCG intramuscular penicillin prophylaxis,
+rh_med___2,rhd,"601. Medications - 2, Oral penicillin V",checkbox,"1, Benzathine penicillin G | 2, Oral penicillin V | 3, Erythromycin | 4, Warfarin | 5, Other cardiac medicines",Approximate,chk(adm_phylaxis___1 %in% 1 | adm_oral_bio___1 %in% 1),,"adm_phylaxis___1, adm_oral_bio___1",admission_treatment_and_hospital_outcome_crf,103. Antibiotic prophylaxis,"1, Oral penicillin | 2, Intramuscular penicillin | 3, Other",Oral penicillin V ~ MRCG oral penicillin prophylaxis or oral Penicillin V,
+rh_med___3,rhd,"601. Medications - 3, Erythromycin",checkbox,"1, Benzathine penicillin G | 2, Oral penicillin V | 3, Erythromycin | 4, Warfarin | 5, Other cardiac medicines",Approximate,chk(adm_oral_bio___5 %in% 1),,adm_oral_bio___5,admission_treatment_and_hospital_outcome_crf,102.0 Oral antibiotics,"1, Penicillin V | 2, Cloxacillin | 3, Amoxicillin | 4, Co-amoxiclav | 5, Macrolide | 6, Co-trimoxazole | 7, Ciprofloxacin | 8, Cefalexin | 9, Clindamycin | 10, Metronidazole | 11, Other",Erythromycin ~ MRCG oral macrolide,
+rh_med___4,rhd,"601. Medications - 4, Warfarin",checkbox,"1, Benzathine penicillin G | 2, Oral penicillin V | 3, Erythromycin | 4, Warfarin | 5, Other cardiac medicines",Approximate,chk(adm_caid___5 %in% 1),,adm_caid___5,admission_treatment_and_hospital_outcome_crf,Cardiac treatment,"1, Diuretics | 3, Anti-hypertensives | 5, Anti-coagulants | 4, Other",Warfarin ~ MRCG anti-coagulants,
+rh_med___5,rhd,"601. Medications - 5, Other cardiac medicines",checkbox,"1, Benzathine penicillin G | 2, Oral penicillin V | 3, Erythromycin | 4, Warfarin | 5, Other cardiac medicines",Approximate,chk(adm_caid___1 %in% 1 | adm_caid___3 %in% 1 | adm_caid___4 %in% 1),,"adm_caid___1, adm_caid___3, adm_caid___4",admission_treatment_and_hospital_outcome_crf,Cardiac treatment,"1, Diuretics | 3, Anti-hypertensives | 5, Anti-coagulants | 4, Other",Other cardiac medicines ~ MRCG diuretics / anti-hypertensives / other cardiac,
+rh_mdc_bpnc_dt,rhd,"601. Benzathine penicillin G, date of first dose:",text/date_dmy,,Approximate,to_date(adm_int_pen),,adm_int_pen,admission_treatment_and_hospital_outcome_crf,103.3 Intramuscular penicillin start date,,IM penicillin start date,
+rh_mdc_oralpnc_dt,rhd,"601. Oral penicillin V, date of first dose:",text/date_dmy,,Approximate,"coalesce(to_date(adm_opn_sd), to_date(adm_pcn_sd))",,"adm_opn_sd, adm_pcn_sd",admission_treatment_and_hospital_outcome_crf,103.2 Oral penicillin start date,,Oral penicillin prophylaxis or Penicillin V start date,
+rh_mdc_erthrmc_dt,rhd,"601. Erythromycin, date of first dose:",text/date_dmy,,Approximate,to_date(adm_mar_sd),,adm_mar_sd,admission_treatment_and_hospital_outcome_crf,Macrolide start date,,Macrolide start date,
+rh_mdc_wrfr_dt,rhd,"601. Warfarin, date of first dose:",text/date_dmy,,Approximate,to_date(adm_coa_sd),,adm_coa_sd,admission_treatment_and_hospital_outcome_crf,Anti-coagulants start date,,Anti-coagulants start date,
+rh_med_x,rhd,"601. Other cardiac medicines, specify:",text,,Approximate,adm_caid_oth,,adm_caid_oth,admission_treatment_and_hospital_outcome_crf,"Other Cardiac treatment, please specify:",,"Other cardiac treatment, specify",
+rh_med_x_dt,rhd,"601. Medications - Other cardiac medicine, date of first dose:",text/date_dmy,,Not available,,,,,,,,
+rh_surgery,rhd,602. Surgical intervention,radio,"1, Yes | 2, No",Recode,yn12(adm_surgery),,adm_surgery,admission_treatment_and_hospital_outcome_crf,107 Surgery,"1, Yes | 0, No",MRCG yes/no (1/0) -> MLW 1 Yes / 2 No,
+rh_surgery_x,rhd,"602.1. If yes, specify:",radio,"1, Valve repair | 2, Valve replacement",Not available,,,,,,,,
+rh_trtoth,rhd,"603. If other treatment, specify:",notes,,Not available,,,,,,,,
+rh_trtoth_na,rhd,603. If other treatment - NA,checkbox,"1, NA",Not available,,,,,,,,
+rh_dt,rhd,701. Today's date:,text/date_dmy,,Exact,to_date(rhd_date),,rhd_date,rhd_case_report_form,602 Date,,RHD CRF date,
+rh_by,rhd,702. Initials of person who completed this form:,text,,Exact,rhd_intitials,,rhd_intitials,rhd_case_report_form,601 Initials of person who completed this form:,,,
+rhf_disch_dt,rhd_followup,101. Date of discharge,text/date_dmy,,Approximate,"replace(to_date(adm_dod_dd), adm_out_dis %in% 5, NA)",,"adm_dod_dd, adm_out_dis",admission_treatment_and_hospital_outcome_crf,111 Date of discharge (date of death if died),,See rh_disch_dt,
+rhf_disch_dt_na,rhd_followup,101. Date of discharge - NA,radio,"1, Patient left against medical advice, GO to 101.3 | 2, N/A, patient deceased during admission",Partial,"ifelse(adm_out_dis %in% 5, 2, NA)",,adm_out_dis,admission_treatment_and_hospital_outcome_crf,113 Outcome at time of discharge,"1, Resolved/recovered | 2, Resolved/recovered with sequelae | 3, Ongoing stable chronic condition | 4, Ongoing | 5, Resulted in death | 6, Not known/lost to follow-up","Only ""deceased during admission"" (2) available; ""left against medical advice"" not in MRCG",
+rh_dc_dt,rhd_followup,"101.1. If deceased during admission, date of death:",text/date_dmy,,Exact,to_date(adm_dod),,adm_dod,admission_treatment_and_hospital_outcome_crf,115 Date of death,,Date of death during admission,
+rh_dc_cause,rhd_followup,"101.2. If deceased, cause of death:",text,,Exact,adm_cod,,adm_cod,admission_treatment_and_hospital_outcome_crf,115.1 Cause of death,,,
+rhf_left_dt,rhd_followup,"101.3. If patient left against medical advice, date left against medical advice:",text/date_dmy,,Not available,,,,,,,,
+rhf_left_x,rhd_followup,"101.3. If patient left against medical advice, specify reason if known:",notes,,Not available,,,,,,,,
+rhf_disch_x_dk,rhd_followup,101.3. If patient left against medical advice - Unknown reason,checkbox,"1, Unknown reason",Not available,,,,,,,,
+rhf_disch_dgns,rhd_followup,102. Diagnosis at discharge:,text,,Not available,,,,,,,,
+rhf_waiver,rhd_followup,103. Was patient enrolled in surveillance under waiver of consent?,radio,"1, Yes, GO to 401 | 2, No",Not available,,,,,,,MRCG has no waiver of consent,
+rhf_stay_d,rhd_followup,201. Number of days patient was hospitalized (hospital length of stay),text/integer,,Derived,as.numeric(to_date(adm_dod_dd) - to_date(cda_dt_ad)),,"adm_dod_dd, cda_dt_ad",admission_treatment_and_hospital_outcome_crf,111 Date of discharge (date of death if died),,Length of stay = discharge/death date - admission date,
+rhf_icu,rhd_followup,202. Was the patient admitted to the ICU during hospital stay?,radio,"1, Yes | 2, No, GO to 301",Derived,"ifelse(adm_iten_teat___1 %in% 1, 1, ifelse(!is.na(adm_dod_dd), 2, NA))",,"adm_iten_teat___1, adm_dod_dd",admission_treatment_and_hospital_outcome_crf,Interventions and treatment,"1, Intensive care | 2, Dialysis | 3, Other | 4, Not Applicable","Yes if ""Intensive care"" checked; No if admission outcome form completed",
+rhf_icu_d,rhd_followup,"202.1. If yes, number of days in ICU:",text/integer,,Exact,as.numeric(adm_inte_dt),,adm_inte_dt,admission_treatment_and_hospital_outcome_crf,Intensive care Days treatment,,Intensive care days,
+rhf_icuwhy,rhd_followup,"202.2. If yes, reason admitted to ICU:",text,,Not available,,,,,,,,
+rhf_icuwhy_dk,rhd_followup,"202.2. If yes, reason admitted to ICU - Don't know",checkbox,"99, Don't know",Not available,,,,,,,,
+rhf_lostfu,rhd_followup,301. Was the patient lost to follow-up?,radio,"1, Yes | 2, No, GO to 302",Approximate,"ifelse(fwu_oct_tof %in% 7, 1, ifelse(!is.na(fwu_oct_tof), 2, NA))",fwu_tof_up %in% 1,fwu_oct_tof,followup_crf,104 Outcome at time of follow-up visit,"1, Re-admitted | 2, Resolved/recovered | 3, Resolved/recovered with sequelae | 4, Ongoing stable chronic condition | 5, Ongoing | 6, Resulted in death | 7, Not known/lost to follow-up",28-day follow-up outcome = Not known/lost to follow-up,
+rhf_lostfu_dt,rhd_followup,"301.1. If yes, date confirmed lost to follow-up:",text/date_dmy,,Not available,,,,,,,,
+rhf_dc,rhd_followup,302. Patient deceased within 30 days of discharge?,radio,"1, Yes | 2, No, GO to 303",Approximate,"ifelse(fwu_oct_tof %in% 6, 1, ifelse(!is.na(fwu_oct_tof), 2, NA))",fwu_tof_up %in% 1,fwu_oct_tof,followup_crf,104 Outcome at time of follow-up visit,"1, Re-admitted | 2, Resolved/recovered | 3, Resolved/recovered with sequelae | 4, Ongoing stable chronic condition | 5, Ongoing | 6, Resulted in death | 7, Not known/lost to follow-up",28-day follow-up outcome = Resulted in death,
+rhf_dc_dt,rhd_followup,"302.1. If yes, date of death:",text/date_dmy,,Exact,to_date(fwu_dod),fwu_tof_up %in% 1,fwu_dod,followup_crf,106 Date of death,,,
+rhf_dc_cause,rhd_followup,"302.2. If yes, cause of death:",text,,Exact,fwu_cod,fwu_tof_up %in% 1,fwu_cod,followup_crf,106.1 Cause of death,,,
+rhf_readm,rhd_followup,303. Patient re-admitted within 30 days of discharge?,radio,"1, Yes | 2, No, GO to 304",Recode,yn12(fwu_reda),fwu_tof_up %in% 1,fwu_reda,followup_crf,107 Re-admitted,"1, Yes | 0, No",MRCG yes/no (1/0) -> MLW 1 Yes / 2 No,
+rhf_readm_dt,rhd_followup,"303.1. If yes, date of re-admission:",text/date_dmy,,Exact,to_date(fwu_dor_mis),fwu_tof_up %in% 1,fwu_dor_mis,followup_crf,107.1 Date of readmission,,MRCG datetime -> date,
+rhf_redisch_dt,rhd_followup,"303.2. If yes, date of discharge:",text/date_dmy,,Not available,,,,,,,,
+rhf_redisch_dt_na,rhd_followup,"303.2. If yes, date of discharge - NA",radio,"1, N/A, patient remains hospitalized | 2, N/A, patient deceased during re-admission | 3, Patient left against medical advice",Not available,,,,,,,,
+rhf_readm_why,rhd_followup,"303.3. If yes, reason for re-admission:",text,,Exact,fwu_cor_mis,fwu_tof_up %in% 1,fwu_cor_mis,followup_crf,107.2 Cause of re-admission,,,
+rhf_rhdcompl,rhd_followup,"303.4. If re-admitted for RHD complication, specify:",checkbox,"1, Shortness of breath | 2, Chest pain | 3, Swelling | 4, New murmur | 5, Infective endocarditis | 6, Cardiac failure | 7, Cardiac failure in pregnancy | 8, Atrial fibrillation | 9, Stroke | 98, Other, specify",Not available,,,,,,,,
+rhf_rhdcompl_x,rhd_followup,"303.4. If re-admitted for RHD complication, specify - Other, specify:",text,,Not available,,,,,,,,
+rhf_readm_dgns,rhd_followup,"303.5. If yes, specify diagnosis:",notes,,Not available,,,,,,,,
+rhf_readm_trt,rhd_followup,"303.6. If yes, specify treatment plan:",notes,,Not available,,,,,,,,
+rhf_rtn,rhd_followup,304. Did patient return to the health facility for additional outpatient care?,radio,"1, Yes | 2, No, GO to 401",Not available,,,,,,,,
+rhf_rtn_smpt,rhd_followup,"304.1. If yes, specify presenting complaint:",notes,,Not available,,,,,,,,
+rhf_rtn_dgns,rhd_followup,304.2. Specify diagnosis:,notes,,Not available,,,,,,,,
+rhf_rtn_trt,rhd_followup,304.3. Specify treatment plan (check any that apply):,checkbox,"1, Medication prescribed | 2, Medication not prescribed | 3, Follow-up recommended if signs/symptoms unresolved",Not available,,,,,,,,
+rhf_rtn_trt_x,rhd_followup,"304.3. Specify treatment plan -medicine prescribed, specify:",notes,,Not available,,,,,,,,
+rhf_by,rhd_followup,401. Initials of person who completed this form:,text,,Not available,,,,,,,,
+rhf_dt,rhd_followup,402. Date,text/date_dmy,,Approximate,to_date(fwu_dof),fwu_tof_up %in% 1,fwu_dof,followup_crf,101 Date of follow-up,,Date of 28-day follow-up,
+,,,,,MRCG only,,,rhd_nod,rhd_case_report_form,102 Number of days since first symptoms,"1, days, {rhd_days} | 2, not known",No MLW counterpart,
+,,,,,MRCG only,,,rhd_days,rhd_case_report_form,Days,,No MLW counterpart,
+,,,,,MRCG only,,,rhd_ech_rults,rhd_case_report_form,Echocardiography results,,No MLW counterpart,
+,,,,,MRCG only,,,rhd_cwd,rhd_case_report_form,102 Consistent with RHD,"1, Yes | 0, No",No MLW counterpart,
+,,,,,MRCG only,,,rhd_path_mur,rhd_case_report_form,103 Pathological murmur,"1, Yes | 0, No",No MLW counterpart,
+,,,,,MRCG only,,,rhd_spy2,rhd_case_report_form,"If yes, specify",,No MLW counterpart,
+,,,,,MRCG only,,,rhd_sympto,rhd_case_report_form,104 Symptomatic disease,"1, Yes | 0, No",No MLW counterpart,
+,,,,,MRCG only,,,rhd_spy3,rhd_case_report_form,"If yes, specify",,No MLW counterpart,
+,,,,,MRCG only,,,rhd_his_arf,rhd_case_report_form,105 History of ARF (see Risk Factors CRF),"1, Yes | 0, No",No MLW counterpart,
+,,,,,MRCG only,,,rhd_dcy_rhd,rhd_case_report_form,Diagnostic Category for RHD,"1, Clinical RHD with no history of ARF, Echocardiographic evidence of RHD in a symptomatic person + NO history of ARF | 2, Clinical RHD with history of ARF, Echocardiographic evidence of RHD in a symptomatic person + history of ARF | 3, Suspected RHD with history of ARF, Pathological murmur + history of ARF + NO echocardiography available | 4, Latent RHD, Echocardiographic evidence of RHD discovered during echocardiographic screening | 5, Not RHD",No MLW counterpart,
+,,,,,MRCG only,,,rhd_spy4,rhd_case_report_form,"If not rhd, specify",,No MLW counterpart,
+,,,,,MRCG only,,,phr_rhe_hdr,prior_history_and_risk_factors_crf,107 Rheumatic heart disease,"1, Yes | 0, No",No MLW counterpart,
+,,,,,MRCG only,,,phr_ddis,prior_history_and_risk_factors_crf,107.2 Diagnosis date,,No MLW counterpart,
+,,,,,MRCG only,,,phr_diag,prior_history_and_risk_factors_crf,107.3 Diagnosis,"1, Echocardiography | 2, Clinical only",No MLW counterpart,
+,,,,,MRCG only,,,tri_rhe_hdis,triage_crf,7. Rheumatic heart disease,"1, Existing rheumatic heart disease | 2, New heart murmur | 3, Heart failure (shortness of breath, oedema/swelling/raised JVP) | 4, Infective endocarditis | 5, Cardiac arrhythmia | 6, Not applicable",No MLW counterpart,
+,,,,,MRCG only,,,adm_out_dis,admission_treatment_and_hospital_outcome_crf,113 Outcome at time of discharge,"1, Resolved/recovered | 2, Resolved/recovered with sequelae | 3, Ongoing stable chronic condition | 4, Ongoing | 5, Resulted in death | 6, Not known/lost to follow-up",No MLW counterpart,
+,,,,,MRCG only,,,fwu_oct_tof,followup_crf,104 Outcome at time of follow-up visit,"1, Re-admitted | 2, Resolved/recovered | 3, Resolved/recovered with sequelae | 4, Ongoing stable chronic condition | 5, Ongoing | 6, Resulted in death | 7, Not known/lost to follow-up",No MLW counterpart,
+,,,,,MRCG only,,,fwu_tof_up,followup_crf,102 Time of follow-up,"1, 28 days after discharge | 2, 12 months after discharge | 3, Other timepoint after discharge",No MLW counterpart,
+===== END FILE =====
+
+===== FILE: varmap/SAVAC_HOS_varmap_PGI.csv =====
+ref_field,ref_form,ref_label,ref_type,ref_choices,match,site_expr,row_filter,site_fields,site_form,site_label,site_choices,note,confirmed
+rh_adm_dt,rhd,101. Date of admission,text/date_dmy,,Derived,"if_else(rh_enrol_from %in% 1, to_date(rh_adm_opd_dt), to_date(rh_adm_ipd_dt))",,"rh_adm_opd_dt, rh_adm_ipd_dt",rhd,"101.2. Was the patient admitted after OPD evaluation? - if yes, specify Date of admission:",,"PGI splits admission date by rh_enrol_from: OPD (1) -> rh_adm_opd_dt (only if admitted after OPD evaluation), IPD (2) -> rh_adm_ipd_dt",
+rh_disch_dt,rhd,102. Date of discharge,text/date_dmy,,Exact,rh_disch_dt,,rh_disch_dt,rhd,102.1. Date of discharge,,,
+rh_disch_dt_na,rhd,102. Date of discharge - NA,checkbox,"1, NA, patient hospitalized",Exact,rh_disch_dt_na,,rh_disch_dt_na,rhd,102.1. Date of discharge - NA,"1, NA, patient hospitalized",,
+rh_ic,rhd,103. Has informed consent and informed assent (for participants 13-18 years old) been obtained?,radio,"1, Yes | 2, No | 3, NA, enrolled under a waiver of consent",Exact,rh_ic,,rh_ic,rhd,103. Has informed consent for participant ≥ 18 years old (or parent/guardian/LAR consent for child participants <18 years and/or informed assent for child participants 13 to <18 years) been obtained?,"1, Yes | 2, No | 3, NA, enrolled under a waiver of consent",,
+rh_no_ic,rhd,104. Reason consent / assent not obtained:,radio,"1, Participant declined | 2, Parent / guardian declined | 98, Other, specify",Exact,rh_no_ic,,rh_no_ic,rhd,104. Reason consent / assent not obtained:,"1, Participant declined | 2, Parent / guardian declined | 98, Other, specify",,
+rh_no_ic_1,rhd,104. Reason consent / assent not obtained:,radio,"3, Care team declined approaching patient, patient enrolled under a waiver of consent | 98, Other, specify",Exact,rh_no_ic_1,,rh_no_ic_1,rhd,104. Reason consent / assent not obtained:,"3, Care team declined approaching patient, patient enrolled under a waiver of consent | 98, Other, specify",,
+rh_no_ic_x,rhd,"104. Reason consent / assent not obtained - Other, specify",text,,Exact,rh_no_ic_x,,rh_no_ic_x,rhd,"104. Reason consent / assent not obtained - Other, specify",,,
+rh_ic_dt,rhd,105. Date of obtaining consent / assent:,text/date_dmy,,Exact,rh_ic_dt,,rh_ic_dt,rhd,105. Date of obtaining consent / assent:,,,
+rh_ic_dt_na,rhd,105. Date of obtaining consent / assent-NA,radio,"1, NA, declined consent, DO NOT CONTINUE",Exact,rh_ic_dt_na,,rh_ic_dt_na,rhd,105. Date of obtaining consent / assent-NA,"1, NA, declined consent, DO NOT CONTINUE",,
+rh_ic_dt_na_1,rhd,105. Date of obtaining consent / assent-NA,radio,"2, NA, patient under waiver of consent, GO to 203",Exact,rh_ic_dt_na_1,,rh_ic_dt_na_1,rhd,105. Date of obtaining consent / assent-NA,"2, NA, patient under waiver of consent, GO to 203",,
+rh_enrolsite,rhd,106. Enrolment site:,text,,Exact,rh_enrolsite,,rh_enrolsite,rhd,106. Enrolment site:,,,
+rh_surv,rhd,107. Was the patient identified through the ARF surveillance?,radio,"1, Yes | 2, No, GO to 201",Exact,rh_surv,,rh_surv,rhd,107. Was the patient identified through the ARF surveillance?,"1, Yes | 2, No, GO to 201",,
+rh_diag_arf,rhd,107.1. RHD diagnosis from ARF surveillance,radio,"1, Definite RHD | 2, Probable RHD",Exact,rh_diag_arf,,rh_diag_arf,rhd,107.1. RHD diagnosis from ARF surveillance,"1, Definite RHD | 2, Probable RHD",,
+rh_town,rhd,201. Town / neighborhood / settlement area:,text,,Exact,rh_town,,rh_town,rhd,201. [ Name of patient's town / neighborhood / settlement area ],,,
+rh_eth,rhd,202. Optional variable: Ethnicity,text,,Exact,rh_eth,,rh_eth,rhd,202. [Optional variable: Ethnicity],,,
+rh_gender,rhd,203. Gender:,radio,"1, Male | 2, Female",Exact,rh_gender,,rh_gender,rhd,203. Gender:,"1, Male | 2, Female",,
+rh_age_year,rhd,204. Age in years,text/number,,Exact,rh_age_year,,rh_age_year,rhd,204. Age in years,,,
+rh_age_month,rhd,"204.1. If less than 1 year, age in months:",text/number,,Exact,rh_age_month,,rh_age_month,rhd,"204.1. If less than 1 year, age in months:",,,
+rh_age_day,rhd,"204.2. If less than 1 month, age in days:",text/number,,Exact,rh_age_day,,rh_age_day,rhd,"204.2. If less than 1 month, age in days:",,,
+rh_height,rhd,205. Height (cm):,text/integer,,Exact,rh_height,,rh_height,rhd,205. Height (cm):,,,
+rh_height_na,rhd,205. Height (cm) - Not assessed,checkbox,"1, Not assessed",Exact,rh_height_na,,rh_height_na,rhd,205. Height (cm) - Not assessed,"1, Not assessed",,
+rh_weight,rhd,206. Weight (kg):,text/integer,,Exact,rh_weight,,rh_weight,rhd,206. Weight (kg):,,,
+rh_weight_na,rhd,206. Weight (kg) - Not assessed,checkbox,"1, Not assessed",Exact,rh_weight_na,,rh_weight_na,rhd,206. Weight (kg) - Not assessed,"1, Not assessed",,
+rh_muac,rhd,207. Mid-upper-arm circumference (MUAC) (mm) for ≤5 years,text/number,,Exact,rh_muac,,rh_muac,rhd,207. Mid-upper-arm circumference (MUAC) (mm) for ≤ 5 years,,,
+rh_muac_na,rhd,207. Mid-upper-arm circumference (MUAC) (mm) for ≤5 years - Not assessed,checkbox,"1, Not assessed",Exact,rh_muac_na,,rh_muac_na,rhd,207. Mid-upper-arm circumference (MUAC) (mm) for ≤ 5 years - Not assessed,"1, Not assessed",,
+rh_arfhist,rhd,301. Does the patient have a previous history of ARF?,radio,"1, Yes (via previous medical record) | 2, Yes (via ARF surveillance) | 3, Yes (self-report) | 4, No, GO to 401 | 99, Don't know, GO to 401",Exact,rh_arfhist,,rh_arfhist,rhd,301. Does the patient have a previous history of ARF?,"1, Yes (via previous medical record) | 2, Yes (via ARF surveillance) | 3, Yes (self-report) | 4, No, GO to 401 | 99, Don't know, GO to 401",,
+rh_arfhist_x,rhd,"301.1. If yes, specify:",radio,"1, Definite ARF | 2, Probable ARF | 3, Cannot verify (self-report)",Exact,rh_arfhist_x,,rh_arfhist_x,rhd,"301.1. If yes, specify:","1, Definite ARF | 2, Probable ARF | 3, Cannot verify (self-report)",,
+rh_arfhist_no,rhd,301.2. How many ARF episodes has the patient had?,text/integer,,Exact,rh_arfhist_no,,rh_arfhist_no,rhd,301.2. How many ARF episodes has the patient had?,,,
+rh_arfhist_no_dk,rhd,301.2. How many ARF episodes has the patient had? - Don't know,checkbox,"99, Don't know",Exact,rh_arfhist_no_dk,,rh_arfhist_no_dk,rhd,301.2. How many ARF episodes has the patient had? - Don't know,"99, Don't know",,
+rh_arfhist_dt,rhd,301.3. Date of last ARF episode:,text/date_dmy,,Exact,rh_arfhist_dt,,rh_arfhist_dt,rhd,301.3. Date of last ARF episode:,,,
+rh_arfhist_dt_dk,rhd,301.3. Date of last ARF episode - Don't know,checkbox,"99, Don't know",Exact,rh_arfhist_dt_dk,,rh_arfhist_dt_dk,rhd,301.3. Date of last ARF episode - Don't know,"99, Don't know",,
+rh_smpt,rhd,401. What is the patient's presenting complaint / reason for admission? (check any that apply),checkbox,"1, Shortness of breath | 2, Chest pain | 3, Swelling | 4, New murmur | 5, Infective endocarditis | 6, Cardiac failure | 7, Cardiac failure in pregnancy | 8, Atrial fibrillation | 9, Stroke | 10, Other, specify",Exact,rh_smpt,,rh_smpt,rhd,401. What is the patient's presenting complaint / reason for admission? (check any that apply),"1, Shortness of breath | 2, Chest pain | 3, Swelling | 4, New murmur | 5, Infective endocarditis | 6, Cardiac failure | 7, Cardiac failure in pregnancy | 8, Atrial fibrillation | 9, Stroke | 10, Other, specify",,
+rh_smpt_x,rhd,"401. What is the patient's presenting complaint / reason for admission? - Other, specify:",text,,Exact,rh_smpt_x,,rh_smpt_x,rhd,"401. What is the patient's presenting complaint / reason for admission? - Other, specify:",,,
+rh_eval,rhd,402.Valves / lesions of RHD:,checkbox,"1, MR | 2, MS | 3, MR/MS | 4, AR | 5, AS | 6, AR/AS | 7, TR | 98, Other",Exact,rh_eval,,rh_eval,rhd,402.Valves / lesions of RHD:,"1, MR | 2, MS | 3, MR/MS | 4, AR | 5, AS | 6, AR/AS | 7, TR | 98, Other",,
+rh_eval_mr,rhd,402. MR,radio,"1, Mild | 2, Moderate | 3, Severe",Exact,rh_eval_mr,,rh_eval_mr,rhd,402. MR,"1, Mild | 2, Moderate | 3, Severe",,
+rh_eval_ms,rhd,402. MS,radio,"1, Mild | 2, Moderate | 3, Severe",Exact,rh_eval_ms,,rh_eval_ms,rhd,402. MS,"1, Mild | 2, Moderate | 3, Severe",,
+rh_eval_mrms,rhd,402. MR/MS,radio,"1, Mild | 2, Moderate | 3, Severe",Exact,rh_eval_mrms,,rh_eval_mrms,rhd,402. MR/MS,"1, Mild | 2, Moderate | 3, Severe",,
+rh_eval_ar,rhd,402. AR,radio,"1, Mild | 2, Moderate | 3, Severe",Exact,rh_eval_ar,,rh_eval_ar,rhd,402. AR,"1, Mild | 2, Moderate | 3, Severe",,
+rh_eval_as,rhd,402. AS,radio,"1, Mild | 2, Moderate | 3, Severe",Exact,rh_eval_as,,rh_eval_as,rhd,402. AS,"1, Mild | 2, Moderate | 3, Severe",,
+rh_eval_aras,rhd,402. AR/AS,radio,"1, Mild | 2, Moderate | 3, Severe",Exact,rh_eval_aras,,rh_eval_aras,rhd,402. AR/AS,"1, Mild | 2, Moderate | 3, Severe",,
+rh_eval_tr,rhd,402. TR,radio,"1, Mild | 2, Moderate | 3, Severe",Exact,rh_eval_tr,,rh_eval_tr,rhd,402. TR,"1, Mild | 2, Moderate | 3, Severe",,
+rh_eval_x,rhd,"402. Valves / lesions of RHD - Other, specify",text,,Exact,rh_eval_x,,rh_eval_x,rhd,"402. Valves / lesions of RHD - Other, specify",,,
+rh_eval_oth,rhd,402. Other([rh_eval_x]),radio,"1, Mild | 2, Moderate | 3, Severe",Exact,rh_eval_oth,,rh_eval_oth,rhd,402. Other([rh_eval_x]),"1, Mild | 2, Moderate | 3, Severe",,
+rh_echocard_dt,rhd,403. Date of patient's last echocardiogram:,text/date_dmy,,Exact,rh_echocard_dt,,rh_echocard_dt,rhd,403. Date of patient's last echocardiogram:,,,
+rh_echocard_dt_dk,rhd,403. Date of patient's last echocardiogram - Don't know,checkbox,"99, Don't know",Exact,rh_echocard_dt_dk,,rh_echocard_dt_dk,rhd,403. Date of patient's last echocardiogram - Don't know,"99, Don't know",,
+rh_dgn_noarf,rhd,501. Clinical RHD with no history of ARF Echocardiographic evidence of RHD in a symptomatic person + NO history of ARF,radio,"1, Yes | 2, No",Exact,rh_dgn_noarf,,rh_dgn_noarf,rhd,501. Clinical RHD with no history of ARF Echocardiographic evidence of RHD in a symptomatic person + NO history of ARF,"1, Yes | 2, No",,
+rh_dgn_hisarf,rhd,502. Clinical RHD with history of ARF Echocardiographic evidence of RHD in a symptomatic person + history of ARF,radio,"1, Yes | 2, No",Exact,rh_dgn_hisarf,,rh_dgn_hisarf,rhd,502. Clinical RHD with history of ARF Echocardiographic evidence of RHD in a symptomatic person + history of ARF,"1, Yes | 2, No",,
+rh_dgn_sushisarf,rhd,503. Suspected RHD with history of ARF Pathological murmur + history of ARF + NO echocardiography available,radio,"1, Yes | 2, No",Exact,rh_dgn_sushisarf,,rh_dgn_sushisarf,rhd,503. Suspected RHD with history of ARF Pathological murmur + history of ARF + NO echocardiography available,"1, Yes | 2, No",,
+rh_dgn_latent,rhd,504. Latent RHD Echocardiographic evidence of RHD discovered during echocardiographic screening,radio,"1, Yes | 2, No",Exact,rh_dgn_latent,,rh_dgn_latent,rhd,504. Latent RHD Echocardiographic evidence of RHD discovered during echocardiographic screening,"1, Yes | 2, No",,
+rh_med,rhd,601. Medications,checkbox,"1, Benzathine penicillin G | 2, Oral penicillin V | 3, Erythromycin | 4, Warfarin | 5, Other cardiac medicines",Exact,rh_med,,rh_med,rhd,601. Medications,"1, Benzathine penicillin G | 2, Oral penicillin V | 3, Erythromycin | 4, Warfarin | 5, Other cardiac medicines",,
+rh_mdc_bpnc_dt,rhd,"601. Benzathine penicillin G, date of first dose:",text/date_dmy,,Exact,rh_mdc_bpnc_dt,,rh_mdc_bpnc_dt,rhd,"601. Benzathine penicillin G, date of first dose:",,,
+rh_mdc_oralpnc_dt,rhd,"601. Oral penicillin V, date of first dose:",text/date_dmy,,Exact,rh_mdc_oralpnc_dt,,rh_mdc_oralpnc_dt,rhd,"601. Oral penicillin V, date of first dose:",,,
+rh_mdc_erthrmc_dt,rhd,"601. Erythromycin, date of first dose:",text/date_dmy,,Exact,rh_mdc_erthrmc_dt,,rh_mdc_erthrmc_dt,rhd,"601. Erythromycin, date of first dose:",,,
+rh_mdc_wrfr_dt,rhd,"601. Warfarin, date of first dose:",text/date_dmy,,Exact,rh_mdc_wrfr_dt,,rh_mdc_wrfr_dt,rhd,"601. Warfarin, date of first dose:",,,
+rh_med_x,rhd,"601. Other cardiac medicines, specify:",text,,Exact,rh_med_x,,rh_med_x,rhd,"601. Other cardiac medicines, specify:",,,
+rh_med_x_dt,rhd,"601. Medications - Other cardiac medicine, date of first dose:",text/date_dmy,,Exact,rh_med_x_dt,,rh_med_x_dt,rhd,"601. Medications - Other cardiac medicine, date of first dose:",,,
+rh_surgery,rhd,602. Surgical intervention,radio,"1, Yes | 2, No",Exact,rh_surgery,,rh_surgery,rhd,602. Surgical intervention,"1, Yes | 2, No",,
+rh_surgery_x,rhd,"602.1. If yes, specify:",radio,"1, Valve repair | 2, Valve replacement",Exact,rh_surgery_x,,rh_surgery_x,rhd,"602.1. If yes, specify:","1, Valve repair | 2, Valve replacement",,
+rh_trtoth,rhd,"603. If other treatment, specify:",notes,,Exact,rh_trtoth,,rh_trtoth,rhd,"603. If other treatment, specify:",,,
+rh_trtoth_na,rhd,603. If other treatment - NA,checkbox,"1, NA",Exact,rh_trtoth_na,,rh_trtoth_na,rhd,603. If other treatment - NA,"1, NA",,
+rh_dt,rhd,701. Today's date:,text/date_dmy,,Exact,rh_dt,,rh_dt,rhd,701. Today's date:,,,
+rh_by,rhd,702. Initials of person who completed this form:,text,,Exact,rh_by,,rh_by,rhd,702. Initials of person who completed this form:,,,
+rhf_disch_dt,rhd_followup,101. Date of discharge,text/date_dmy,,Exact,rhf_disch_dt,,rhf_disch_dt,rhd_followup,101. Date of discharge,,,
+rhf_disch_dt_na,rhd_followup,101. Date of discharge - NA,radio,"1, Patient left against medical advice, GO to 101.3 | 2, N/A, patient deceased during admission",Exact,rhf_disch_dt_na,,rhf_disch_dt_na,rhd_followup,101. Date of discharge - NA,"1, Patient left against medical advice, GO to 101.3 | 2, N/A, patient deceased during admission | 3, N/A, patient enrolled from OPD, GO to 102","PGI has extra code 3 ""N/A, patient enrolled from OPD"" (shown as [code 3])",
+rh_dc_dt,rhd_followup,"101.1. If deceased during admission, date of death:",text/date_dmy,,Exact,rh_dc_dt,,rh_dc_dt,rhd_followup,"101.1. If deceased during admission, date of death:",,,
+rh_dc_cause,rhd_followup,"101.2. If deceased, cause of death:",text,,Exact,rh_dc_cause,,rh_dc_cause,rhd_followup,"101.2. If deceased, cause of death:",,,
+rhf_left_dt,rhd_followup,"101.3. If patient left against medical advice, date left against medical advice:",text/date_dmy,,Exact,rhf_left_dt,,rhf_left_dt,rhd_followup,"101.3. If patient left against medical advice, date left against medical advice:",,,
+rhf_left_x,rhd_followup,"101.3. If patient left against medical advice, specify reason if known:",notes,,Exact,rhf_left_x,,rhf_left_x,rhd_followup,"101.3. If patient left against medical advice, specify reason if known:",,,
+rhf_disch_x_dk,rhd_followup,101.3. If patient left against medical advice - Unknown reason,checkbox,"1, Unknown reason",Exact,rhf_disch_x_dk,,rhf_disch_x_dk,rhd_followup,101.3. If patient left against medical advice - Unknown reason,"1, Unknown reason",,
+rhf_disch_dgns,rhd_followup,102. Diagnosis at discharge:,text,,Exact,rhf_disch_dgns,,rhf_disch_dgns,rhd_followup,102. Diagnosis at discharge/visit:,,,
+rhf_waiver,rhd_followup,103. Was patient enrolled in surveillance under waiver of consent?,radio,"1, Yes, GO to 401 | 2, No",Exact,rhf_waiver,,rhf_waiver,rhd_followup,103. Was patient enrolled in surveillance under waiver of consent?,"1, Yes, GO to 301 | 2, No",Same codes; only skip instruction text differs (GO to 401 vs GO to 301),
+rhf_stay_d,rhd_followup,201. Number of days patient was hospitalized (hospital length of stay),text/integer,,Exact,rhf_stay_d,,rhf_stay_d,rhd_followup,201. Number of days patient was hospitalized (hospital length of stay),,,
+rhf_icu,rhd_followup,202. Was the patient admitted to the ICU during hospital stay?,radio,"1, Yes | 2, No, GO to 301",Exact,rhf_icu,,rhf_icu,rhd_followup,202. Was the patient admitted to the ICU during hospital stay?,"1, Yes | 2, No, GO to 301",,
+rhf_icu_d,rhd_followup,"202.1. If yes, number of days in ICU:",text/integer,,Exact,rhf_icu_d,,rhf_icu_d,rhd_followup,"202.1. If yes, number of days in ICU:",,,
+rhf_icuwhy,rhd_followup,"202.2. If yes, reason admitted to ICU:",text,,Exact,rhf_icuwhy,,rhf_icuwhy,rhd_followup,"202.2. If yes, reason admitted to ICU:",,,
+rhf_icuwhy_dk,rhd_followup,"202.2. If yes, reason admitted to ICU - Don't know",checkbox,"99, Don't know",Exact,rhf_icuwhy_dk,,rhf_icuwhy_dk,rhd_followup,"202.2. If yes, reason admitted to ICU - Don't know","99, Don't know",,
+rhf_lostfu,rhd_followup,301. Was the patient lost to follow-up?,radio,"1, Yes | 2, No, GO to 302",Exact,rhf_lostfu,,rhf_lostfu,rhd_followup,301. Was the patient lost to follow-up?,"1, Yes | 2, No, GO to 302",,
+rhf_lostfu_dt,rhd_followup,"301.1. If yes, date confirmed lost to follow-up:",text/date_dmy,,Exact,rhf_lostfu_dt,,rhf_lostfu_dt,rhd_followup,"301.1. If yes, date confirmed lost to follow-up:",,,
+rhf_dc,rhd_followup,302. Patient deceased within 30 days of discharge?,radio,"1, Yes | 2, No, GO to 303",Exact,rhf_dc,,rhf_dc,rhd_followup,302. Patient deceased within 30 days of discharge?,"1, Yes | 2, No, GO to 303",,
+rhf_dc_dt,rhd_followup,"302.1. If yes, date of death:",text/date_dmy,,Exact,rhf_dc_dt,,rhf_dc_dt,rhd_followup,"302.1. If yes, date of death:",,,
+rhf_dc_cause,rhd_followup,"302.2. If yes, cause of death:",text,,Exact,rhf_dc_cause,,rhf_dc_cause,rhd_followup,"302.2. If yes, cause of death:",,,
+rhf_readm,rhd_followup,303. Patient re-admitted within 30 days of discharge?,radio,"1, Yes | 2, No, GO to 304",Exact,rhf_readm,,rhf_readm,rhd_followup,303. Patient re-admitted within 30 days of discharge?,"1, Yes | 2, No, GO to 304",,
+rhf_readm_dt,rhd_followup,"303.1. If yes, date of re-admission:",text/date_dmy,,Exact,rhf_readm_dt,,rhf_readm_dt,rhd_followup,"303.1. If yes, date of re-admission:",,,
+rhf_redisch_dt,rhd_followup,"303.2. If yes, date of discharge:",text/date_dmy,,Exact,rhf_redisch_dt,,rhf_redisch_dt,rhd_followup,"303.2. If yes, date of discharge:",,,
+rhf_redisch_dt_na,rhd_followup,"303.2. If yes, date of discharge - NA",radio,"1, N/A, patient remains hospitalized | 2, N/A, patient deceased during re-admission | 3, Patient left against medical advice",Exact,rhf_redisch_dt_na,,rhf_redisch_dt_na,rhd_followup,"303.2. If yes, date of discharge - NA","1, N/A, patient remains hospitalized | 2, N/A, patient deceased during re-admission | 3, Patient left against medical advice",,
+rhf_readm_why,rhd_followup,"303.3. If yes, reason for re-admission:",text,,Exact,rhf_readm_why,,rhf_readm_why,rhd_followup,"303.3. If yes, reason for re-admission:",,,
+rhf_rhdcompl,rhd_followup,"303.4. If re-admitted for RHD complication, specify:",checkbox,"1, Shortness of breath | 2, Chest pain | 3, Swelling | 4, New murmur | 5, Infective endocarditis | 6, Cardiac failure | 7, Cardiac failure in pregnancy | 8, Atrial fibrillation | 9, Stroke | 98, Other, specify",Exact,rhf_rhdcompl,,rhf_rhdcompl,rhd_followup,"303.4. If re-admitted for RHD complication, specify:","1, Shortness of breath | 2, Chest pain | 3, Swelling | 4, New murmur | 5, Infective endocarditis | 6, Cardiac failure | 7, Cardiac failure in pregnancy | 8, Atrial fibrillation | 9, Stroke | 98, Other, specify",,
+rhf_rhdcompl_x,rhd_followup,"303.4. If re-admitted for RHD complication, specify - Other, specify:",text,,Exact,rhf_rhdcompl_x,,rhf_rhdcompl_x,rhd_followup,"303.4. If re-admitted for RHD complication, specify - Other, specify:",,,
+rhf_readm_dgns,rhd_followup,"303.5. If yes, specify diagnosis:",notes,,Exact,rhf_readm_dgns,,rhf_readm_dgns,rhd_followup,"303.5. If yes, specify diagnosis:",,,
+rhf_readm_trt,rhd_followup,"303.6. If yes, specify treatment plan:",notes,,Exact,rhf_readm_trt,,rhf_readm_trt,rhd_followup,"303.6. If yes, specify treatment plan:",,,
+rhf_rtn,rhd_followup,304. Did patient return to the health facility for additional outpatient care?,radio,"1, Yes | 2, No, GO to 401",Exact,rhf_rtn,,rhf_rtn,rhd_followup,304. Did patient return to the health facility for additional outpatient care?,"1, Yes | 2, No, GO to 401 | 3, NA, patient under a waiver of consent, GO to 401","PGI has extra code 3 ""NA, patient under a waiver of consent"" (shown as [code 3])",
+rhf_rtn_smpt,rhd_followup,"304.1. If yes, specify presenting complaint:",notes,,Exact,rhf_rtn_smpt,,rhf_rtn_smpt,rhd_followup,"304.1. If yes, specify presenting complaint:",,,
+rhf_rtn_dgns,rhd_followup,304.2. Specify diagnosis:,notes,,Exact,rhf_rtn_dgns,,rhf_rtn_dgns,rhd_followup,304.2. Specify diagnosis:,,,
+rhf_rtn_trt,rhd_followup,304.3. Specify treatment plan (check any that apply):,checkbox,"1, Medication prescribed | 2, Medication not prescribed | 3, Follow-up recommended if signs/symptoms unresolved",Exact,rhf_rtn_trt,,rhf_rtn_trt,rhd_followup,304.3. Specify treatment plan (check any that apply):,"1, Medication prescribed | 2, Medication not prescribed | 3, Follow-up recommended if signs/symptoms unresolved",,
+rhf_rtn_trt_x,rhd_followup,"304.3. Specify treatment plan -medicine prescribed, specify:",notes,,Exact,rhf_rtn_trt_x,,rhf_rtn_trt_x,rhd_followup,"304.3. Specify treatment plan -medicine prescribed, specify:",,,
+rhf_by,rhd_followup,401. Initials of person who completed this form:,text,,Exact,rhf_by,,rhf_by,rhd_followup,401. Initials of person who completed this form:,,,
+rhf_dt,rhd_followup,402. Date,text/date_dmy,,Exact,rhf_dt,,rhf_dt,rhd_followup,402. Date,,,
+,,,,,PGI only,,,rh_enrol_from,rhd,101. Patient enrolled from:,"1, OPD | 2, IPD",No MLW counterpart,
+,,,,,PGI only,,,rh_opd_visit_dt,rhd,"101.1. If OPD, Date of OPD visit:",,No MLW counterpart,
+,,,,,PGI only,,,rh_enrol_opd,rhd,101.2. Was the patient admitted after OPD evaluation?,"2, No | 1, Yes",No MLW counterpart,
+,,,,,PGI only,,,rh_visit_reason,rhd,102.2. Primary reason for visit:,"1, New illness | 2, Follow-up visit | 3, Referral from another facility | 98, Other",No MLW counterpart,
+,,,,,PGI only,,,rh_visit_reason_x,rhd,"102.2. Primary reason for visit - Other, specify",,No MLW counterpart,
+===== END FILE =====
+

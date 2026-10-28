@@ -1,0 +1,309 @@
+---
+title: "SAVAC - Community Trigger"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# 1. Setup
+
+```{r libraries}
+# install.packages(c("REDCapR", "dplyr", "tidyr", "purrr", "lubridate", "writexl"))
+library(REDCapR)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(lubridate)
+```
+
+# 2. Load data from REDCap
+
+```{r tokens}
+readRenviron("C:/Users/saehyeun.song/Documents/.Renviron")
+
+uri <- "https://ivirdc.ivi.int/api/"
+
+token_names <- c(
+  MLW_COMM  = "SAVAC_MLW_COMM_TOKEN_IVI",
+  PGI_COMM  = "SAVAC_PGI_COMM_TOKEN_PID180",
+  MRCG_COMM = "SAVAC_MRCG_COMM_TOKEN_IVI"
+)
+
+tokens <- Sys.getenv(token_names)
+names(tokens) <- names(token_names)
+
+# Stop if any token is missing
+missing <- names(tokens)[tokens == ""]
+if (length(missing) > 0) {
+  stop("Missing tokens in .Renviron: ", paste(token_names[missing], collapse = ", "))
+}
+```
+
+```{r load-functions}
+# Read records from one project ("raw" or "label")
+read_redcap <- function(token, site, raw_or_label = "raw") {
+  message("> ", site, " [", raw_or_label, "] loading...")
+  res <- REDCapR::redcap_read(
+    redcap_uri   = uri,
+    token        = token,
+    raw_or_label = raw_or_label,
+    batch_size   = 500,
+    verbose      = FALSE
+  )
+  if (!res$success) {
+    warning(site, " [", raw_or_label, "] failed: ", res$outcome_message)
+    return(NULL)
+  }
+  message("  OK: ", nrow(res$data), " rows / ", ncol(res$data), " cols")
+  res$data
+}
+
+# Read data dictionary from one project
+read_metadata <- function(token, site) {
+  message("> ", site, " [metadata] loading...")
+  res <- REDCapR::redcap_metadata_read(redcap_uri = uri, token = token, verbose = FALSE)
+  if (!res$success) {
+    warning(site, " [metadata] failed: ", res$outcome_message)
+    return(NULL)
+  }
+  res$data
+}
+```
+
+```{r load-data}
+dat_raw   <- imap(tokens, read_redcap, raw_or_label = "raw")    # coded values
+dat_label <- imap(tokens, read_redcap, raw_or_label = "label")  # choice labels
+meta      <- imap(tokens, read_metadata)                         # data dictionaries
+
+mlw_comm_raw  <- dat_raw$MLW_COMM
+pgi_comm_raw  <- dat_raw$PGI_COMM
+mrcg_comm_raw <- dat_raw$MRCG_COMM
+
+mlw_comm_lab  <- dat_label$MLW_COMM
+pgi_comm_lab  <- dat_label$PGI_COMM
+mrcg_comm_lab <- dat_label$MRCG_COMM
+
+mlw_comm_meta  <- meta$MLW_COMM
+pgi_comm_meta  <- meta$PGI_COMM
+mrcg_comm_meta <- meta$MRCG_COMM
+```
+
+# 3. Check event names
+
+```{r events}
+table(mlw_comm_raw$redcap_event_name)
+table(pgi_comm_raw$redcap_event_name)
+table(mrcg_comm_raw$redcap_event_name)
+```
+
+# 4. Functions
+
+```{r functions}
+# Build trigger dataset with baseline (bs_) variables and age
+# baseline_event / trigger_event: event names differ by site
+make_comm_trigger <- function(df,
+                              baseline_event = "baseline_arm_1",
+                              trigger_event  = "trigger_arm_1") {
+
+  # Baseline: non-repeating row only (one row per record), bs_ variables only
+  bs <- df %>%
+    filter(redcap_event_name == baseline_event,
+           is.na(redcap_repeat_instrument)) %>%
+    select(record_id, starts_with("bs_"))
+
+  # Add age-related variables missing in some sites (filled with NA)
+  for (v in c("bs_dob", "bs_ic_dt", "bs_age_year", "bs_age_month", "bs_age_calc")) {
+    if (!v %in% names(bs)) bs[[v]] <- NA
+  }
+
+  # DOB usable: if bs_dob_known exists (MRCG), only when bs_dob_known == 1
+  bs$dob_ok <- if ("bs_dob_known" %in% names(bs)) bs$bs_dob_known %in% 1 else TRUE
+
+  bs <- bs %>%
+    mutate(
+      # as.character() first so all-NA logical columns convert safely
+      bs_dob   = as.Date(as.character(bs_dob)),
+      bs_ic_dt = as.Date(as.character(bs_ic_dt)),
+
+      # Age at informed consent from DOB
+      age_dob = if_else(dob_ok,
+                        time_length(interval(bs_dob, bs_ic_dt), "year"),
+                        NA_real_),
+
+      # REDCap-calculated age
+      age_calc = as.numeric(bs_age_calc),
+
+      # Reported age (years + months)
+      age_reported = if_else(
+        is.na(bs_age_year),
+        NA_real_,
+        as.numeric(bs_age_year) + coalesce(as.numeric(bs_age_month), 0) / 12
+      ),
+
+      # Final age: DOB first, then REDCap-calculated age, then reported
+      age_exact  = coalesce(age_dob, age_calc, age_reported),
+      age_years  = round(age_exact, 1),
+      age_source = case_when(
+        !is.na(age_dob)      ~ "dob",
+        !is.na(age_calc)     ~ "calc",
+        !is.na(age_reported) ~ "reported",
+        TRUE                 ~ NA_character_
+      )
+    ) %>%
+    select(-dob_ok)
+
+  # Trigger: drop empty bs_ columns, then attach baseline info
+  df %>%
+    filter(redcap_event_name == trigger_event) %>%
+    select(-starts_with("bs_")) %>%
+    select(where(~ !all(is.na(.x)))) %>%          # drop columns empty in trigger rows
+    mutate(record_id = as.character(record_id)) %>%
+    left_join(bs %>% mutate(record_id = as.character(record_id)),
+              by = "record_id", relationship = "many-to-one")
+}
+
+# Age group: completed years (floor) from unrounded age, so 18.9 stays in 15-18
+add_age_group <- function(df) {
+  df %>%
+    mutate(
+      age_int   = floor(age_exact),
+      age_group = case_when(
+        age_int <  5                 ~ "<5",
+        age_int >= 5  & age_int < 15 ~ "5-14",
+        age_int >= 15 & age_int < 19 ~ "15-18",
+        age_int >= 19                ~ "19+",
+        TRUE                         ~ "Missing"
+      ),
+      age_group = factor(age_group, levels = c("<5", "5-14", "15-18", "19+", "Missing"))
+    )
+}
+
+# Age group counts for one site (unique records, n + %)
+age_table <- function(df) {
+  df %>%
+    distinct(record_id, age_group) %>%
+    count(age_group, .drop = FALSE) %>%
+    mutate(pct = round(n / sum(n) * 100, 1)) %>%
+    bind_rows(tibble(age_group = "Total", n = sum(.$n), pct = 100))
+}
+```
+
+# 5. Build trigger datasets
+
+```{r build}
+mlw_comm_trig  <- make_comm_trigger(mlw_comm_raw) %>%
+  add_age_group()
+
+pgi_comm_trig  <- make_comm_trigger(pgi_comm_raw) %>%
+  add_age_group()
+
+mrcg_comm_trig <- make_comm_trigger(mrcg_comm_raw,
+                                    baseline_event = "baseline_q0_arm_1") %>%
+  add_age_group()
+```
+
+# 6. Checks
+
+```{r checks-records}
+# Trigger rows / unique records
+nrow(mlw_comm_trig);  n_distinct(mlw_comm_trig$record_id)
+nrow(pgi_comm_trig);  n_distinct(pgi_comm_trig$record_id)
+nrow(mrcg_comm_trig); n_distinct(mrcg_comm_trig$record_id)
+
+# Duplicated record_id in trigger datasets (if any)
+mlw_comm_trig  %>% count(record_id) %>% filter(n > 1)
+pgi_comm_trig  %>% count(record_id) %>% filter(n > 1)
+mrcg_comm_trig %>% count(record_id) %>% filter(n > 1)
+```
+
+```{r checks-age}
+# Age source (dob / calc / reported / NA = no age info)
+table(mlw_comm_trig$age_source,  useNA = "ifany")
+table(pgi_comm_trig$age_source,  useNA = "ifany")
+table(mrcg_comm_trig$age_source, useNA = "ifany")
+
+# Age distribution
+summary(mlw_comm_trig$age_exact)
+summary(pgi_comm_trig$age_exact)
+summary(mrcg_comm_trig$age_exact)
+
+# Implausible age (negative or > 100)
+mlw_comm_trig  %>% filter(age_exact < 0 | age_exact > 100) %>% distinct(record_id, bs_dob, bs_ic_dt, age_years)
+pgi_comm_trig  %>% filter(age_exact < 0 | age_exact > 100) %>% distinct(record_id, bs_dob, bs_ic_dt, age_years)
+mrcg_comm_trig %>% filter(age_exact < 0 | age_exact > 100) %>% distinct(record_id, bs_dob, bs_ic_dt, age_years)
+
+# MLW: DOB-based age vs REDCap-calculated age (should be ~0)
+summary(mlw_comm_trig$age_dob - mlw_comm_trig$age_calc)
+```
+
+```{r checks-mrcg}
+# MRCG: which age variables actually have values (by event)
+mrcg_comm_raw %>%
+  group_by(redcap_event_name) %>%
+  summarise(across(any_of(c("bs_dob_known", "bs_dob", "bs_ic_dt", "bs_age_calc")),
+                   ~ sum(!is.na(.x))))
+
+# MRCG: trigger records with age info
+mrcg_comm_trig %>%
+  distinct(record_id, bs_dob_known, bs_dob, bs_ic_dt, bs_age_calc, age_years, age_source)
+```
+
+# 7. Age group summary
+
+## 7.1 Per site
+
+```{r age-per-site}
+age_table(mlw_comm_trig)
+age_table(pgi_comm_trig)
+age_table(mrcg_comm_trig)
+```
+
+## 7.2 Combined (site x age group)
+
+```{r age-combined}
+# Keep only needed columns before combining
+age_summary <- bind_rows(
+  MLW  = mlw_comm_trig  %>% select(record_id, age_group),
+  PGI  = pgi_comm_trig  %>% select(record_id, age_group),
+  MRCG = mrcg_comm_trig %>% select(record_id, age_group),
+  .id  = "site"
+) %>%
+  distinct(site, record_id, age_group) %>%
+  count(site, age_group, .drop = FALSE) %>%
+  pivot_wider(names_from = age_group, values_from = n, values_fill = 0) %>%
+  mutate(Total = rowSums(across(-site)))
+
+age_summary <- age_summary %>%
+  bind_rows(
+    age_summary %>%
+      summarise(across(where(is.numeric), sum)) %>%
+      mutate(site = "Total")
+  ) %>%
+  mutate(site = factor(site, levels = c("MLW", "PGI", "MRCG", "Total"))) %>%
+  arrange(site)
+
+age_summary
+
+# n (%) version
+age_summary_pct <- age_summary %>%
+  mutate(across(c(`<5`, `5-14`, `15-18`, `19+`, Missing),
+                ~ paste0(.x, " (", round(.x / Total * 100, 1), "%)")))
+
+age_summary_pct
+```
+
+# 8. Save (optional)
+
+```{r save, eval=FALSE}
+writexl::write_xlsx(
+  list(age_n = age_summary, age_pct = age_summary_pct),
+  paste0("SAVAC_comm_age_summary_", Sys.Date(), ".xlsx")
+)
+```
