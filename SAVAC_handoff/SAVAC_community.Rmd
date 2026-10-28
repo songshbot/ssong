@@ -123,7 +123,7 @@ make_comm_trigger <- function(df,
     select(record_id, starts_with("bs_"))
 
   # Add age-related variables missing in some sites (filled with NA)
-  for (v in c("bs_dob", "bs_ic_dt", "bs_age_year", "bs_age_month", "bs_age_calc")) {
+  for (v in c("bs_dob", "bs_ic_dt", "bs_age_year", "bs_age_month", "bs_age_calc", "bs_est_dob_yrs")) {
     if (!v %in% names(bs)) bs[[v]] <- NA
   }
 
@@ -144,21 +144,25 @@ make_comm_trigger <- function(df,
       # REDCap-calculated age
       age_calc = as.numeric(bs_age_calc),
 
-      # Reported age (years + months)
-      age_reported = if_else(
-        is.na(bs_age_year),
-        NA_real_,
-        as.numeric(bs_age_year) + coalesce(as.numeric(bs_age_month), 0) / 12
+      # Reported age (years + months; months only for under 1 year)
+      age_reported = case_when(
+        !is.na(bs_age_year)  ~ as.numeric(bs_age_year) + coalesce(as.numeric(bs_age_month), 0) / 12,
+        !is.na(bs_age_month) ~ as.numeric(bs_age_month) / 12,
+        TRUE                 ~ NA_real_
       ),
 
-      # Final age: DOB first, then REDCap-calculated age, then reported
-      age_exact  = coalesce(age_dob, age_calc, age_reported),
+      # Estimated age in years when DOB is not known (MRCG: bs_dob_known = 99)
+      age_estimated = suppressWarnings(as.numeric(bs_est_dob_yrs)),
+
+      # Final age: DOB first, then REDCap-calculated age, then reported, then estimated
+      age_exact  = coalesce(age_dob, age_calc, age_reported, age_estimated),
       age_years  = round(age_exact, 1),
       age_source = case_when(
-        !is.na(age_dob)      ~ "dob",
-        !is.na(age_calc)     ~ "calc",
-        !is.na(age_reported) ~ "reported",
-        TRUE                 ~ NA_character_
+        !is.na(age_dob)       ~ "dob",
+        !is.na(age_calc)      ~ "calc",
+        !is.na(age_reported)  ~ "reported",
+        !is.na(age_estimated) ~ "estimated",
+        TRUE                  ~ NA_character_
       )
     ) %>%
     select(-dob_ok)

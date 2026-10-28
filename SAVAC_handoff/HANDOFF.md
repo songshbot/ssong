@@ -101,9 +101,12 @@ site_fields, site_form, site_label, site_choices, note, confirmed`
 - baseline 이벤트(MLW/PGI `baseline_arm_1`, **MRCG `baseline_q0_arm_1`**)의 **repeat 아닌 행**에서
   `bs_` 변수와 나이를 가져와 `trigger_arm_1` 레코드에 붙임 (`culture_analysis` repeat 행 때문에
   repeat 행은 제외해야 함).
-- 나이: `bs_dob`(MRCG는 `bs_dob_known == 1`일 때만) ~ `bs_ic_dt` → 없으면 `bs_age_calc`
-  → 없으면 `bs_age_year`(+month). PGI는 DOB 대신 age_year만 있는 경우가 있음.
-  MRCG의 `bs_dob`는 실제 데이터에서 전부 비어 있었음 (de-identified export 가능성).
+- 나이 순서: `bs_dob`(MRCG는 `bs_dob_known == 1`일 때만) ~ `bs_ic_dt` → `bs_age_calc`
+  → `bs_age_year`(+month, month만 있으면 month/12) → `bs_est_dob_yrs`(MRCG 추정 나이). `age_source`에 출처 표시.
+  MRCG `bs_dob`는 딕셔너리에서 Identifier로 지정돼 export에서 비어 옴. MRCG `bs_age_calc`는 DOB~`bs_visit_dt` 계산,
+  DOB 모르면(`bs_dob_known = 99`) 나이는 `bs_est_dob_yrs`에만 있음. PGI `bs_age_calc`는 DOB/age_year/month 모두 반영.
+- MRCG·PGI Community 딕셔너리 받음 (MLW Community 딕셔너리는 아직 없음). 변수명 비교:
+  trigger_event는 같은 이름 51개(PGI만 2, MRCG만 14), baseline_visit_individual은 같은 이름 51개(PGI만 31, MRCG만 26).
 - MRCG `record_id`는 숫자형, MLW는 문자형 → 합칠 때 문자형으로 통일.
 - 나이대별 사이트 요약표(`age_summary`, n (%) 버전) + 사이트별 나이대 ID 리스트(`age_ids`, 엑셀 시트 ids_*).
 - 8. 모든 항목별 사이트 비교 (Hospital 7번과 같은 함수): trigger 데이터셋의 모든 변수,
