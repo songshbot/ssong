@@ -1562,11 +1562,32 @@ age_summary_pct <- age_summary %>%
 age_summary_pct
 ```
 
-# 8. Save (optional)
+## 7.3 ID list by age group (per site)
 
-```{r save, eval=FALSE}
+```{r age-ids}
+# One row per record, sorted by age group then age
+age_id_list <- function(df) {
+  df %>%
+    distinct(record_id, .keep_all = TRUE) %>%
+    transmute(record_id, age_group, age_years, age_source, bs_dob, bs_ic_dt) %>%
+    arrange(age_group, age_years, record_id)
+}
+
+age_ids <- list(
+  ids_MLW  = age_id_list(mlw_comm_trig),
+  ids_PGI  = age_id_list(pgi_comm_trig),
+  ids_MRCG = age_id_list(mrcg_comm_trig)
+)
+
+# Check: counts per age group should match age_summary
+map(age_ids, ~ count(.x, age_group, .drop = FALSE))
+```
+
+# 8. Save
+
+```{r save}
 writexl::write_xlsx(
-  list(age_n = age_summary, age_pct = age_summary_pct),
+  c(list(age_n = age_summary, age_pct = age_summary_pct), age_ids),
   paste0("SAVAC_comm_age_summary_", Sys.Date(), ".xlsx")
 )
 ```
