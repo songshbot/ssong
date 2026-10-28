@@ -95,11 +95,27 @@ csv_file <- c(
 )
 csv_encoding <- "UTF-8-BOM"   # use "latin1" if characters look broken
 
-# Dates in the file may be YYYY-MM-DD (REDCap export) or DD/MM/YYYY (import template)
-parse_redcap_date <- function(x) {
-  as.Date(parse_date_time(as.character(x),
-                          orders = c("Ymd", "dmY", "Ymd HM", "Ymd HMS", "dmY HM", "dmY HMS"),
-                          quiet = TRUE))
+# Slash dates: "mdY" (MM/DD/YYYY) / "dmY" (DD/MM/YYYY), or NA = judge from the file
+# MRCG file: all dates are MM/DD/YYYY (e.g. bs_ic_dt 11/20/2025)
+csv_slash_order <- "mdY"
+
+# Day / month order of slash dates, judged from values where one part is above 12
+# (11/20/2025 can only be MM/DD; 20/11/2025 can only be DD/MM)
+slash_evidence <- function(values) {
+  v  <- trimws(as.character(values))
+  v  <- v[grepl("^\\d{1,2}/\\d{1,2}/\\d{4}", v)]
+  p1 <- as.integer(sub("^(\\d{1,2})/.*$", "\\1", v))
+  p2 <- as.integer(sub("^\\d{1,2}/(\\d{1,2})/.*$", "\\1", v))
+  c(n = length(v), mdy = sum(p2 > 12), dmy = sum(p1 > 12))
+}
+slash_order_of <- function(ev, default) {
+  if (ev[["mdy"]] > ev[["dmy"]]) "mdY" else if (ev[["dmy"]] > ev[["mdy"]]) "dmY" else default
+}
+
+# Dates in the file may be YYYY-MM-DD (REDCap export) or slash dates in the given order
+parse_redcap_date <- function(x, slash_order = "dmY") {
+  orders <- c("Ymd", "Ymd HM", "Ymd HMS", slash_order, paste(slash_order, "HM"), paste(slash_order, "HMS"))
+  as.Date(parse_date_time(trimws(as.character(x)), orders = orders, quiet = TRUE))
 }
 
 # Read a REDCap raw-data CSV and set column types from the data dictionary
@@ -120,7 +136,26 @@ read_redcap_csv <- function(path, m, site) {
     if (all(is.na(v) == is.na(d[[i]]))) d[[i]] <- v
   }
   # Date / datetime fields -> Date
-  for (i in which(grepl("^date", fval))) d[[i]] <- parse_redcap_date(d[[i]])
+  date_cols <- which(grepl("^date", fval))
+  file_ev   <- slash_evidence(unlist(lapply(d[date_cols], na.omit)))
+  file_ord  <- if (!is.na(csv_slash_order)) csv_slash_order else slash_order_of(file_ev, "dmY")
+  message("  slash dates: ", file_ev[["n"]], " values; month-first evidence ", file_ev[["mdy"]],
+          ", day-first evidence ", file_ev[["dmy"]], " -> read as ",
+          ifelse(file_ord == "mdY", "MM/DD/YYYY", "DD/MM/YYYY"))
+  if (is.na(csv_slash_order) && file_ev[["n"]] > 0 && file_ev[["mdy"]] == 0 && file_ev[["dmy"]] == 0)
+    warning(site, ": day/month order of slash dates cannot be judged from the file; set csv_slash_order")
+  for (i in date_cols) {
+    raw <- d[[i]]
+    ev  <- slash_evidence(na.omit(raw))
+    # A column with its own evidence follows it (unless the order is set by hand)
+    ord <- if (!is.na(csv_slash_order)) csv_slash_order else slash_order_of(ev, file_ord)
+    if (ev[["mdy"]] > 0 && ev[["dmy"]] > 0)
+      warning(site, ": ", names(d)[i], " has both MM/DD and DD/MM slash dates - check the file")
+    d[[i]] <- parse_redcap_date(raw, ord)
+    bad <- !is.na(raw) & is.na(d[[i]])
+    if (any(bad)) warning(site, ": ", names(d)[i], " has ", sum(bad), " value(s) not read as a date, e.g. ",
+                          paste(head(unique(raw[bad]), 3), collapse = ", "))
+  }
 
   missing_cols <- setdiff(c("record_id", "redcap_event_name", "redcap_repeat_instrument"), names(d))
   if (length(missing_cols) > 0) warning(site, ": columns not in file: ", paste(missing_cols, collapse = ", "))
